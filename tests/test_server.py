@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from app.config import settings
 from app.server import app
+from app.version import APP_VERSION
 
 
 class ServerApiTests(unittest.TestCase):
@@ -45,6 +46,15 @@ class ServerApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["filename"], "notes.md")
         self.assertEqual((settings.workspace_dir / "notes.md").read_bytes(), b"hello")
+
+    def test_version_endpoint_returns_release_metadata(self):
+        response = self.client.get("/api/version")
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["name"], "Auctus Agent")
+        self.assertEqual(data["version"], APP_VERSION)
+        self.assertEqual(data["api_compat"], "v1")
 
     def test_upload_rejects_empty_file(self):
         response = self.client.post("/api/upload?filename=empty.md", content=b"")
@@ -480,13 +490,11 @@ class ServerApiTests(unittest.TestCase):
         self.assertIn("充值与计费", billing.text)
         self.assertEqual(app_page.status_code, 200)
         self.assertIn("System Language", app_page.text)
-        self.assertIn("Global Vercel", app_page.text)
         self.assertIn("国内阿里云", app_page.text)
-        self.assertIn("Whole Computer", app_page.text)
-        self.assertIn("Terminal Command Access", app_page.text)
-        self.assertIn("Verify Key", app_page.text)
-        self.assertIn("Contacting the model", app_page.text)
-        self.assertIn("Question received. Working on it", app_page.text)
+        self.assertIn("整台电脑", app_page.text)
+        self.assertIn("终端命令权限", app_page.text)
+        self.assertIn("验证", app_page.text)
+        self.assertIn("你好，我在这里", app_page.text)
 
 
 if __name__ == "__main__":

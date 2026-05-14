@@ -1,0 +1,2352 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Auctus Agent</title>
+  <style>
+    :root{
+      /* The Digital Companion + Minimalist Capsule */
+      --bg0:#070A12;
+      --bg1:#0B1020;
+      --panel:rgba(255,255,255,.06);
+      --panel2:rgba(255,255,255,.08);
+      --stroke:rgba(255,255,255,.12);
+      --stroke2:rgba(255,255,255,.18);
+      --text:#EAF0FF;
+      --muted:rgba(234,240,255,.68);
+      --shadow:0 18px 70px rgba(0,0,0,.45);
+      --shadow2:0 10px 42px rgba(0,0,0,.35);
+      --radius:18px;
+      --radius2:14px;
+      --accent:#2D7CFF;     /* klein-ish blue */
+      --accent2:#00F5FF;    /* neon cyan */
+      --good:#3CF28B;
+      --warn:#FFB020;
+      --bad:#FF4D6D;
+      --mono:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;
+      --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,Roboto,Helvetica,Arial,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    }
+
+    html,body{height:100%}
+    body{
+      margin:0;
+      font-family:var(--sans);
+      color:var(--text);
+      background:
+        radial-gradient(1200px 900px at 20% 10%, rgba(45,124,255,.22), transparent 60%),
+        radial-gradient(900px 700px at 85% 12%, rgba(0,245,255,.16), transparent 55%),
+        radial-gradient(900px 700px at 55% 95%, rgba(60,242,139,.10), transparent 60%),
+        linear-gradient(160deg, var(--bg0), var(--bg1));
+      overflow:hidden;
+    }
+
+    /* ====== The Core (animated orb) ====== */
+    .core-wrap{
+      position:fixed; inset:0;
+      display:grid; place-items:center;
+      pointer-events:none;
+      opacity:.95;
+      filter:saturate(1.12);
+    }
+    .core{
+      width:min(420px, 72vw);
+      aspect-ratio:1/1;
+      position:relative;
+      transform: translateY(-18px);
+    }
+    .core::before,
+    .core::after{
+      content:"";
+      position:absolute; inset:0;
+      border-radius: 44% 56% 52% 48% / 48% 40% 60% 52%;
+      background:
+        radial-gradient(circle at 35% 30%, rgba(255,255,255,.14), transparent 35%),
+        radial-gradient(circle at 62% 58%, rgba(0,245,255,.18), transparent 42%),
+        radial-gradient(circle at 40% 70%, rgba(45,124,255,.20), transparent 46%),
+        radial-gradient(circle at 52% 50%, rgba(0,0,0,.0), rgba(0,0,0,.60) 70%);
+      box-shadow:
+        0 0 0 1px rgba(255,255,255,.08) inset,
+        0 0 65px rgba(0,245,255,.20),
+        0 0 95px rgba(45,124,255,.18),
+        0 38px 120px rgba(0,0,0,.55);
+      filter: blur(.2px);
+      animation: coreMorph 9s ease-in-out infinite;
+    }
+    .core::after{
+      inset: 18px;
+      opacity:.9;
+      filter: blur(18px);
+      mix-blend-mode: screen;
+      animation: coreSpin 12s linear infinite;
+    }
+    .core-ring{
+      position:absolute; inset:-12px;
+      border-radius:999px;
+      background:
+        conic-gradient(from 220deg,
+          rgba(0,245,255,.0),
+          rgba(0,245,255,.28),
+          rgba(45,124,255,.22),
+          rgba(0,245,255,.0) 70%);
+      filter: blur(14px);
+      opacity:.55;
+      animation: coreSpin 10s linear infinite reverse;
+    }
+    .core-dot{
+      position:absolute; inset:0;
+      display:grid; place-items:center;
+      font-family:var(--mono);
+      font-size:12px;
+      color:rgba(234,240,255,.72);
+      letter-spacing:.18em;
+      text-transform:uppercase;
+      opacity:.0;
+      transition: opacity .2s ease;
+    }
+    body.busy .core-dot{opacity:.85}
+
+    @keyframes coreSpin{to{transform:rotate(360deg)}}
+    @keyframes coreMorph{
+      0%{transform:scale(1) rotate(0deg); border-radius:44% 56% 52% 48% / 48% 40% 60% 52%}
+      35%{transform:scale(1.02) rotate(8deg); border-radius:54% 46% 42% 58% / 56% 52% 48% 44%}
+      70%{transform:scale(.99) rotate(-9deg); border-radius:46% 54% 58% 42% / 44% 58% 42% 56%}
+      100%{transform:scale(1) rotate(0deg); border-radius:44% 56% 52% 48% / 48% 40% 60% 52%}
+    }
+
+    /* ====== App shell ====== */
+    .shell{
+      position:relative;
+      height:100%;
+      display:flex;
+      flex-direction:column;
+    }
+    .topbar{
+      height:56px;
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      padding:0 16px;
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+      background: linear-gradient(to bottom, rgba(5,8,15,.55), rgba(5,8,15,.20));
+      border-bottom: 1px solid rgba(255,255,255,.06);
+    }
+    .brand{
+      display:flex; align-items:center; gap:10px;
+      min-width:0;
+    }
+    .brand-badge{
+      width:28px;height:28px;border-radius:10px;
+      background: radial-gradient(circle at 35% 30%, rgba(255,255,255,.16), transparent 40%),
+                  radial-gradient(circle at 65% 65%, rgba(0,245,255,.22), transparent 46%),
+                  linear-gradient(135deg, rgba(45,124,255,.42), rgba(0,245,255,.22));
+      box-shadow: 0 0 0 1px rgba(255,255,255,.12) inset, 0 10px 28px rgba(0,0,0,.4);
+    }
+    .brand h1{
+      margin:0;
+      font-size:14px;
+      font-weight:650;
+      letter-spacing:.03em;
+    }
+    .brand small{
+      display:block;
+      margin-top:2px;
+      font-size:11px;
+      color:var(--muted);
+      letter-spacing:.02em;
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
+      max-width: 46vw;
+    }
+    .actions{
+      display:flex; align-items:center; gap:10px;
+    }
+    .pill{
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+      padding:8px 10px;
+      border-radius:999px;
+      background: rgba(255,255,255,.06);
+      border:1px solid rgba(255,255,255,.10);
+      box-shadow: 0 8px 22px rgba(0,0,0,.20);
+      user-select:none;
+    }
+    .dot{
+      width:8px;height:8px;border-radius:999px;
+      background: rgba(255,255,255,.25);
+      box-shadow: 0 0 0 1px rgba(255,255,255,.10) inset;
+    }
+    body.busy .dot{
+      background: var(--accent2);
+      box-shadow: 0 0 22px rgba(0,245,255,.55), 0 0 0 1px rgba(255,255,255,.12) inset;
+      animation: breathe 1.2s ease-in-out infinite;
+    }
+    @keyframes breathe{
+      0%,100%{transform:scale(1); opacity:.72}
+      50%{transform:scale(1.35); opacity:1}
+    }
+
+    button{
+      font:inherit;
+      color:inherit;
+      border:1px solid rgba(255,255,255,.12);
+      background: rgba(255,255,255,.06);
+      border-radius: 999px;
+      padding:8px 12px;
+      cursor:pointer;
+      transition: transform .12s ease, background .12s ease, border-color .12s ease;
+      box-shadow: 0 10px 26px rgba(0,0,0,.22);
+    }
+    button:hover{transform:translateY(-1px); background: rgba(255,255,255,.08); border-color: rgba(255,255,255,.18)}
+    button:active{transform:translateY(0px) scale(.99)}
+    button.primary{
+      background: linear-gradient(135deg, rgba(45,124,255,.82), rgba(0,245,255,.42));
+      border-color: rgba(255,255,255,.20);
+    }
+    button.danger{
+      background: linear-gradient(135deg, rgba(255,77,109,.78), rgba(255,176,32,.22));
+      border-color: rgba(255,255,255,.22);
+    }
+    button.ghost{
+      background: transparent;
+      box-shadow:none;
+    }
+
+    /* ====== Main content ====== */
+    .main{
+      flex:1;
+      min-height:0;
+      display:flex;
+      justify-content:center;
+      padding:18px 16px 96px;
+      overflow:hidden;
+    }
+    .stateflow{
+      width:min(980px, 100%);
+      margin: 12px auto -6px;
+      padding: 0 16px;
+      box-sizing:border-box;
+      display:none;
+      gap:10px;
+      align-items:center;
+      color: rgba(234,240,255,.74);
+      font-size:12px;
+    }
+    .stateflow.open{display:flex}
+    .stateflow .chip{
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+      padding:8px 10px;
+      border-radius:999px;
+      border:1px solid rgba(255,255,255,.10);
+      background: rgba(255,255,255,.05);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      box-shadow: 0 10px 26px rgba(0,0,0,.22);
+      max-width: 100%;
+    }
+    .stateflow code{
+      font-family: var(--mono);
+      font-size: 11px;
+      color: rgba(234,240,255,.80);
+    }
+    .frame{
+      width:min(980px, 100%);
+      height:100%;
+      display:flex;
+      flex-direction:column;
+      gap:12px;
+    }
+    .messages{
+      flex:1;
+      min-height:0;
+      overflow:auto;
+      padding:6px 6px 24px;
+      scrollbar-gutter: stable;
+    }
+    .messages::-webkit-scrollbar{width:10px}
+    .messages::-webkit-scrollbar-thumb{background: rgba(255,255,255,.10); border-radius:999px}
+    .messages::-webkit-scrollbar-track{background: transparent}
+
+    .bubble{
+      max-width: 860px;
+      margin: 0 auto 12px;
+      padding:12px 14px;
+      border-radius: var(--radius);
+      border:1px solid rgba(255,255,255,.10);
+      background: rgba(255,255,255,.06);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      box-shadow: var(--shadow2);
+      line-height:1.55;
+      white-space:pre-wrap;
+    }
+    .bubble.user{
+      margin-left:auto;
+      background: linear-gradient(135deg, rgba(45,124,255,.18), rgba(0,245,255,.08));
+      border-color: rgba(45,124,255,.28);
+    }
+    .bubble.agent{
+      position:relative;
+    }
+    .bubble.agent::before{
+      content:"";
+      position:absolute;
+      inset:0;
+      border-radius: var(--radius);
+      pointer-events:none;
+      box-shadow: 0 0 0 1px rgba(255,255,255,.05) inset, 0 0 60px rgba(45,124,255,.10);
+      opacity:.85;
+    }
+    .meta{
+      display:flex; gap:10px; align-items:center;
+      color:var(--muted);
+      font-size:12px;
+      margin: 0 auto 12px;
+      max-width: 860px;
+      padding: 0 2px;
+    }
+    .quick-actions{
+      display:flex;
+      flex-wrap:wrap;
+      gap:8px;
+      margin: -4px auto 14px;
+      max-width: 860px;
+      padding: 0 2px;
+    }
+    .quick-actions button{
+      padding:8px 10px;
+      border-radius: 999px;
+      font-size:12px;
+      box-shadow: 0 10px 26px rgba(0,0,0,.18);
+    }
+    .quick-actions .chip{
+      background: rgba(255,255,255,.06);
+      border-color: rgba(255,255,255,.12);
+    }
+    .quick-actions .chip:hover{
+      border-color: rgba(0,245,255,.30);
+    }
+    .quick-actions .cancel{
+      background: rgba(255,255,255,.02);
+      border-color: rgba(255,255,255,.10);
+      box-shadow:none;
+      opacity:.9;
+    }
+    .quick-actions .danger-chip{
+      background: linear-gradient(135deg, rgba(255,77,109,.20), rgba(255,176,32,.08));
+      border-color: rgba(255,77,109,.28);
+    }
+    .quick-actions .danger-chip:hover{
+      border-color: rgba(255,77,109,.45);
+    }
+    a.file{
+      color: rgba(234,240,255,.92);
+      text-decoration:none;
+      border-bottom: 1px dashed rgba(0,245,255,.38);
+    }
+    a.file:hover{border-bottom-color: rgba(0,245,255,.68)}
+
+    /* ====== Capsule input ====== */
+    .composer{
+      position:fixed;
+      left:50%;
+      bottom:18px;
+      transform:translateX(-50%);
+      width:min(980px, calc(100% - 28px));
+      display:flex;
+      gap:10px;
+      align-items:flex-end;
+      padding:10px 10px;
+      border-radius: 999px;
+      border:1px solid rgba(255,255,255,.12);
+      background: rgba(12,16,28,.55);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      box-shadow: var(--shadow);
+    }
+    .input-wrap{
+      flex:1;
+      display:flex;
+      align-items:center;
+      gap:10px;
+      min-width:0;
+      padding: 2px 4px 2px 6px;
+    }
+    textarea{
+      flex:1;
+      resize:none;
+      min-height: 24px;
+      max-height: 160px;
+      border:0;
+      outline:0;
+      background: transparent;
+      color: var(--text);
+      font: 14px/1.5 var(--sans);
+      padding: 10px 6px;
+    }
+    textarea::placeholder{color: rgba(234,240,255,.45)}
+    .send{
+      min-width: 112px;
+      display:flex; align-items:center; justify-content:center;
+      gap:8px;
+    }
+    .send-col{
+      display:flex;
+      flex-direction:column;
+      gap:8px;
+      align-items:stretch;
+    }
+    .send-col .send{
+      width: 100%;
+      min-width: 112px;
+    }
+    .kbd{
+      font-family:var(--mono);
+      font-size:11px;
+      color: rgba(234,240,255,.62);
+      padding:2px 6px;
+      border-radius:8px;
+      border:1px solid rgba(255,255,255,.12);
+      background: rgba(255,255,255,.06);
+    }
+
+    body.busy .composer{
+      border-color: rgba(0,245,255,.28);
+      box-shadow: 0 0 0 1px rgba(0,245,255,.12) inset, var(--shadow);
+    }
+
+    /* ====== Settings sheet ====== */
+    .backdrop{
+      position:fixed; inset:0;
+      background: rgba(0,0,0,.45);
+      display:none;
+      z-index:40;
+    }
+    .backdrop.open{display:block}
+    .sheet{
+      position:fixed;
+      top:0; right:0;
+      width:min(460px, 94vw);
+      height:100vh;
+      background: rgba(10,12,20,.70);
+      backdrop-filter: blur(18px);
+      -webkit-backdrop-filter: blur(18px);
+      border-left: 1px solid rgba(255,255,255,.10);
+      box-shadow: -24px 0 70px rgba(0,0,0,.55);
+      transform: translateX(100%);
+      transition: transform .18s ease;
+      z-index:41;
+      overflow:auto;
+      padding: 14px;
+      box-sizing:border-box;
+    }
+    .sheet.open{transform: translateX(0)}
+    .sheet-head{
+      display:flex; align-items:center; justify-content:space-between;
+      padding:8px 4px 12px;
+      border-bottom:1px solid rgba(255,255,255,.10);
+      margin-bottom:12px;
+    }
+    .sheet-head h2{margin:0; font-size:14px; color: rgba(234,240,255,.86); letter-spacing:.06em; text-transform:uppercase}
+    .section{
+      border:1px solid rgba(255,255,255,.10);
+      background: rgba(255,255,255,.05);
+      border-radius: var(--radius2);
+      padding: 12px;
+      margin-bottom:12px;
+    }
+    .section h3{margin:0 0 10px; font-size:12px; color: rgba(234,240,255,.68); letter-spacing:.06em; text-transform:uppercase}
+    .row{display:flex; gap:10px; align-items:center; margin-bottom:10px}
+    .row:last-child{margin-bottom:0}
+    select,input{
+      font:inherit;
+      color: var(--text);
+      background: rgba(255,255,255,.06);
+      border:1px solid rgba(255,255,255,.12);
+      border-radius: 12px;
+      padding: 10px 10px;
+      outline:0;
+      width:100%;
+      box-sizing:border-box;
+    }
+    input[type="password"]{font-family: var(--mono)}
+    .muted{color: var(--muted); font-size:12px; line-height:1.45}
+    .status{font-size:12px; margin-top:6px; color: rgba(234,240,255,.72)}
+    .status.good{color: rgba(60,242,139,.95)}
+    .status.bad{color: rgba(255,77,109,.95)}
+
+    /* ====== Wizard overlay (install/onboarding UI) ====== */
+    .overlay{
+      position:fixed; inset:0;
+      display:none;
+      align-items:center;
+      justify-content:center;
+      padding:18px;
+      background: rgba(0,0,0,.55);
+      z-index:60;
+    }
+    .overlay.open{display:flex}
+    .wizard{
+      width:min(860px, 100%);
+      max-height: 92vh;
+      overflow:auto;
+      border-radius: 22px;
+      border:1px solid rgba(255,255,255,.12);
+      background: rgba(10,12,20,.72);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      box-shadow: 0 30px 120px rgba(0,0,0,.62);
+    }
+    .wizard-head{
+      padding:16px 16px 12px;
+      border-bottom: 1px solid rgba(255,255,255,.10);
+      display:flex; align-items:center; justify-content:space-between; gap:10px;
+    }
+    .wizard-title{
+      display:flex; align-items:center; gap:12px;
+      min-width:0;
+    }
+    .wizard-title h2{margin:0; font-size:18px}
+    .wizard-title p{margin:4px 0 0; color: var(--muted); font-size:12px}
+    .wizard-body{padding:16px}
+    .grid{
+      display:grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap:10px;
+      margin: 10px 0 14px;
+    }
+    .card-choice{
+      border:1px solid rgba(255,255,255,.12);
+      background: rgba(255,255,255,.05);
+      border-radius: 16px;
+      padding:12px;
+      cursor:pointer;
+      transition: transform .12s ease, border-color .12s ease, background .12s ease;
+    }
+    .card-choice:hover{transform:translateY(-1px); border-color: rgba(0,245,255,.26)}
+    .card-choice.active{
+      border-color: rgba(0,245,255,.40);
+      background: linear-gradient(135deg, rgba(45,124,255,.14), rgba(0,245,255,.08));
+    }
+    .card-choice strong{display:block; font-size:13px}
+    .card-choice span{display:block; color: var(--muted); font-size:12px; margin-top:6px; line-height:1.35}
+    .two-col{
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap:10px;
+    }
+    .field{display:grid; gap:6px; margin-bottom:12px}
+    .field label{font-size:12px; color: rgba(234,240,255,.72)}
+    .wizard-actions{
+      display:flex; justify-content:space-between; align-items:center; gap:10px;
+      margin-top: 12px;
+      padding-top: 12px;
+      border-top: 1px solid rgba(255,255,255,.10);
+    }
+    .hint{font-size:12px; color: var(--muted)}
+    .error{font-size:12px; color: rgba(255,77,109,.95)}
+
+    /* ====== Permission request modal ====== */
+    .modal{
+      position:fixed; inset:0;
+      display:none;
+      align-items:center;
+      justify-content:center;
+      padding:18px;
+      background: rgba(0,0,0,.58);
+      z-index:70;
+    }
+    .modal.open{display:flex}
+    .modal-card{
+      width:min(520px, 100%);
+      border-radius: 18px;
+      border: 1px solid rgba(255,255,255,.12);
+      background: rgba(10,12,20,.78);
+      backdrop-filter: blur(18px);
+      -webkit-backdrop-filter: blur(18px);
+      box-shadow: 0 28px 100px rgba(0,0,0,.65);
+      padding: 14px;
+    }
+    .modal-card h3{margin:4px 0 8px; font-size:16px}
+    .modal-card p{margin:0 0 12px; color: var(--muted); font-size:12px; line-height:1.45}
+    .modal-actions{display:flex; gap:10px; justify-content:flex-end}
+
+    /* ====== Capsule / Companion toggle ====== */
+    body.capsule .core-wrap{opacity:.22; filter:saturate(1.0) blur(.2px)}
+    body.capsule .frame{width:min(820px,100%)}
+    body.capsule .bubble{border-radius: 16px}
+    body.capsule .composer{bottom:14px; width:min(820px, calc(100% - 28px))}
+    body.capsule .stateflow{width:min(820px, 100%)}
+
+    /* Reduce motion */
+    @media (prefers-reduced-motion: reduce){
+      *{animation-duration:0.001ms !important; animation-iteration-count:1 !important; transition-duration:0.001ms !important}
+    }
+    @media(max-width:780px){
+      .grid{grid-template-columns:1fr}
+      .two-col{grid-template-columns:1fr}
+      .brand small{max-width: 52vw}
+      .send{min-width: 86px}
+    }
+  </style>
+</head>
+<body>
+  <!-- The Core -->
+  <div class="core-wrap" aria-hidden="true">
+    <div class="core">
+      <div class="core-ring"></div>
+      <div class="core-dot" id="coreLabel">THINKING</div>
+    </div>
+  </div>
+
+  <div class="shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-badge"></div>
+        <div style="min-width:0">
+          <h1 id="appTitle">Auctus Agent</h1>
+          <small id="appSub">The Digital Companion</small>
+        </div>
+      </div>
+      <div class="actions">
+        <div class="pill" title="运行状态">
+          <div class="dot"></div>
+          <div style="font-size:12px;color:rgba(234,240,255,.78)" id="statusText">待命</div>
+        </div>
+        <button id="stopBtn" class="danger" type="button" title="紧急停止（取消当前请求）">停止</button>
+        <button id="openSettings" type="button" title="设置">⚙ 设置</button>
+      </div>
+    </header>
+
+    <div class="stateflow" id="stateFlow" aria-live="polite"></div>
+
+    <main class="main">
+      <div class="frame">
+        <div class="messages" id="messages" aria-live="polite"></div>
+      </div>
+    </main>
+
+    <form class="composer" id="chatForm">
+      <div class="input-wrap">
+        <textarea id="message" placeholder="像对一个伙伴下指令：例如“读取 test_prd.md 并生成总结”" rows="1"></textarea>
+      </div>
+      <div class="send-col">
+        <button class="send" id="newlineBtn" type="button">
+          <span>换行</span>
+          <span class="kbd">Shift↵</span>
+        </button>
+        <button class="primary send" id="sendBtn">
+          <span>发送</span>
+          <span class="kbd">Enter</span>
+        </button>
+      </div>
+    </form>
+  </div>
+
+  <!-- Settings -->
+  <div id="backdrop" class="backdrop"></div>
+  <aside id="sheet" class="sheet" aria-label="设置面板">
+    <div class="sheet-head">
+      <h2>设置</h2>
+      <button id="closeSettings" class="ghost" type="button">关闭</button>
+    </div>
+
+    <div class="section">
+      <h3>模型</h3>
+      <div class="row">
+        <select id="model"></select>
+        <button id="saveModel" type="button">切换</button>
+      </div>
+      <div class="muted">建议：先选模型，再保存对应的 API key（或使用本地模型/托管模式）。</div>
+    </div>
+
+    <div class="section">
+      <h3>模型路由 / API Key</h3>
+      <div class="row">
+        <select id="route"></select>
+        <button id="saveRoute" type="button">保存</button>
+      </div>
+      <div class="row">
+        <select id="provider"></select>
+        <input id="apiKey" type="password" placeholder="粘贴你的 API key（只保存在本地）" />
+      </div>
+      <div class="row" style="justify-content:flex-end">
+        <button id="validateKey" type="button">验证</button>
+        <button id="saveKey" class="primary" type="button">保存 Key</button>
+      </div>
+      <div id="keyStatus" class="status"></div>
+    </div>
+
+    <div class="section">
+      <h3>系统语言 / 权限</h3>
+      <div class="row">
+        <select id="uiMode">
+          <option value="companion">伙伴模式（沉浸）</option>
+          <option value="capsule">胶囊模式（轻量）</option>
+        </select>
+        <button id="saveUiMode" type="button">保存</button>
+      </div>
+      <div class="muted" style="margin:-2px 0 10px">胶囊模式会自动“收敛历史”，只保留最近的对话内容，让界面更像 Raycast/Spotlight。</div>
+      <div class="row">
+        <select id="systemLanguage">
+          <option value="zh">中文</option>
+          <option value="en">English</option>
+        </select>
+        <button id="saveLanguage" type="button">保存</button>
+      </div>
+      <div class="row">
+        <select id="permissionScope">
+          <option value="workspace">仅授权文件夹</option>
+          <option value="full_computer">整台电脑</option>
+        </select>
+        <button id="savePermissionScope" type="button">保存</button>
+      </div>
+      <div class="row">
+        <select id="terminalAccess">
+          <option value="disabled">关闭终端命令</option>
+          <option value="enabled">允许终端命令</option>
+        </select>
+        <button id="saveTerminalAccess" type="button">保存</button>
+      </div>
+      <div class="row">
+        <select id="calendarAccess">
+          <option value="disabled">不允许访问日历</option>
+          <option value="enabled">允许访问日历</option>
+        </select>
+        <button id="saveCalendarAccess" type="button">保存</button>
+      </div>
+      <div class="status" id="permissionStatus"></div>
+    </div>
+
+    <div class="section">
+      <h3>文件权限（工作区）</h3>
+      <div class="muted" style="margin-bottom:10px">建议授权一个专门的工作文件夹，例如 Documents/Auctus Workspace。</div>
+      <div class="row">
+        <input id="workspacePath" placeholder="授权文件夹路径" />
+      </div>
+      <div class="row" style="justify-content:flex-end">
+        <button id="pickFolder" type="button">选择</button>
+        <button id="saveWorkspace" class="primary" type="button">授权</button>
+      </div>
+      <div class="status" id="workspaceStatus"></div>
+    </div>
+
+    <div class="section">
+      <h3>上传文件</h3>
+      <div class="row">
+        <input id="file" type="file" />
+      </div>
+      <div class="row" style="justify-content:flex-end">
+        <button id="upload" class="primary" type="button">上传到 inputs/</button>
+      </div>
+      <div class="status" id="uploadStatus"></div>
+    </div>
+
+    <div class="section">
+      <h3>邮件账户</h3>
+      <div class="muted" style="margin-bottom:10px">连接 Gmail / Outlook / QQ 邮箱等 IMAP 账户，Agent 可读取收件箱和搜索邮件（只读，不会自动发送）。Gmail/Outlook 建议使用应用专用密码。</div>
+      <div id="emailAccountList" style="display:grid;gap:8px;margin-bottom:10px"></div>
+      <details id="emailAddForm">
+        <summary style="cursor:pointer;font-size:12px;color:rgba(234,240,255,.68);user-select:none">＋ 添加邮件账户</summary>
+        <div style="margin-top:10px;display:grid;gap:8px">
+          <div class="row">
+            <select id="emailProvider" style="flex:1">
+              <option value="">手动配置 IMAP</option>
+              <option value="gmail">Gmail</option>
+              <option value="outlook">Outlook / Hotmail</option>
+              <option value="qq">QQ 邮箱</option>
+              <option value="163">网易 163</option>
+              <option value="icloud">iCloud Mail</option>
+              <option value="yahoo">Yahoo Mail</option>
+            </select>
+          </div>
+          <div class="row">
+            <input id="emailAddress" type="email" placeholder="邮箱地址 *" style="flex:1" />
+          </div>
+          <div class="row">
+            <input id="emailPassword" type="password" placeholder="应用专用密码 *" style="flex:1" />
+          </div>
+          <div id="emailImapFields" style="display:grid;gap:8px">
+            <div class="row">
+              <input id="emailImapHost" placeholder="IMAP 服务器（如 imap.gmail.com）" style="flex:1" />
+              <input id="emailImapPort" type="number" value="993" style="width:70px" />
+            </div>
+          </div>
+          <div class="row" style="justify-content:flex-end;gap:8px">
+            <button id="testEmailBtn" type="button">测试连接</button>
+            <button id="saveEmailBtn" class="primary" type="button">添加账户</button>
+          </div>
+          <div id="emailStatus" class="status"></div>
+        </div>
+      </details>
+    </div>
+
+    <div class="section">
+      <h3>Telegram 配置</h3>
+      <div id="tgStatus" style="margin-bottom:8px"></div>
+      <details id="tgConfigForm">
+        <summary style="cursor:pointer;font-size:13px;color:#555;padding:4px 0">配置 Telegram Bot ▸</summary>
+        <div style="display:grid;gap:10px;margin-top:10px">
+          <div class="muted" style="line-height:1.6;font-size:12px">
+            <b>步骤：</b><br>
+            1. 在 Telegram 搜索 <b>@BotFather</b>，发送 <code>/newbot</code> 创建 Bot<br>
+            2. 复制 BotFather 给你的 Token（格式：<code>123456:ABC-…</code>）<br>
+            3. 给你的 Bot 发一条任意消息，然后点"获取我的 ID"<br>
+            4. 点"保存并测试"，手机会收到确认消息
+          </div>
+          <div style="display:flex;gap:6px">
+            <input id="tgToken" type="password" placeholder="Bot Token（粘贴后可验证）" style="flex:1" />
+            <button id="tgVerifyBtn" type="button" class="ghost" style="white-space:nowrap">验证 Token</button>
+          </div>
+          <div id="tgBotInfo" class="muted" style="font-size:12px;display:none"></div>
+          <div style="display:flex;gap:6px">
+            <input id="tgUserIds" placeholder="允许的用户 ID（多个用逗号隔开）" style="flex:1" />
+            <button id="tgFetchIdBtn" type="button" class="ghost" style="white-space:nowrap">获取我的 ID</button>
+          </div>
+          <div id="tgFetchResult" class="muted" style="font-size:12px;display:none"></div>
+          <div style="display:flex;gap:6px">
+            <button id="tgSaveBtn" class="primary" type="button">保存并发送测试消息</button>
+          </div>
+          <div id="tgConfigStatus" class="status"></div>
+        </div>
+      </details>
+    </div>
+
+    <div class="section">
+      <h3>候选记忆</h3>
+      <div class="muted">来自"首次设置向导/自我介绍"的信息会先进入候选列表，你可以确认或拒绝。</div>
+      <div id="memories" style="display:grid;gap:10px;margin-top:10px"></div>
+    </div>
+
+    <div class="section">
+      <h3>工具日志</h3>
+      <div class="row" style="justify-content:flex-end">
+        <button id="refreshLogs" type="button">刷新</button>
+      </div>
+      <div id="logs" style="display:grid;gap:10px"></div>
+    </div>
+  </aside>
+
+  <!-- Folder picker -->
+  <div id="folderOverlay" class="modal" aria-label="选择文件夹">
+    <div class="modal-card">
+      <h3>选择要授权的文件夹</h3>
+      <p id="folderPath" class="muted" style="margin-top:0"></p>
+      <div class="row" style="gap:8px; margin-bottom:10px">
+        <button id="folderUp" type="button">上一级</button>
+        <button id="folderUse" class="primary" type="button">使用此文件夹</button>
+        <button id="folderClose" class="ghost" type="button">关闭</button>
+      </div>
+      <div id="folderList" style="display:grid;gap:8px;max-height:52vh;overflow:auto"></div>
+      <div class="muted" style="margin-top:10px">只显示可访问的子文件夹；部分系统目录可能不可读。</div>
+    </div>
+  </div>
+
+  <!-- Onboarding wizard (install UI) -->
+  <div id="wizardOverlay" class="overlay" aria-label="首次设置向导">
+    <div class="wizard">
+      <div class="wizard-head">
+        <div class="wizard-title">
+          <div class="brand-badge"></div>
+          <div style="min-width:0">
+            <h2>首次设置向导</h2>
+            <p>像给“数字伙伴”上电：选择模型接入方式、权限与个性。</p>
+          </div>
+        </div>
+        <button id="wizardClose" class="ghost" type="button">稍后再说</button>
+      </div>
+      <div class="wizard-body">
+        <div class="hint">第 1 步：选择模型接入方式</div>
+        <div class="grid" id="modeGrid">
+          <div class="card-choice" data-mode="own_api">
+            <strong>使用自己的 API Key</strong>
+            <span>适合个人开发者：你提供 OpenAI/Anthropic/DeepSeek 等 Key，本地保存。</span>
+          </div>
+          <div class="card-choice" data-mode="local_model">
+            <strong>本地模型</strong>
+            <span>适合离线/隐私：例如 Ollama。无需云端 Key（但需要你本机已安装模型）。</span>
+          </div>
+          <div class="card-choice" data-mode="hosted_api">
+            <strong>Auctus 托管 API</strong>
+            <span>适合小白：无需配置 API Key，登录账号即可使用。支持套餐订阅 + 余额计费。</span>
+          </div>
+        </div>
+
+        <div class="two-col">
+          <div class="field">
+            <label>模型（Model）</label>
+            <select id="setupModel"></select>
+          </div>
+          <div class="field">
+            <label>语言（System Language）</label>
+            <select id="setupLanguage">
+              <option value="zh">中文</option>
+              <option value="en">English</option>
+            </select>
+          </div>
+        </div>
+
+        <div id="ownApiPanel" class="section" style="margin-top:10px; display:none">
+          <h3>你的 API Key</h3>
+          <div class="two-col">
+            <div class="field">
+              <label>服务商（Provider）</label>
+              <select id="setupProvider"></select>
+            </div>
+            <div class="field">
+              <label>API Key</label>
+              <input id="setupApiKey" type="password" placeholder="sk-... / sk-ant-... / ..." />
+            </div>
+          </div>
+          <div class="row" style="justify-content:flex-end">
+            <button id="setupValidateKey" type="button">验证</button>
+          </div>
+          <div id="setupKeyStatus" class="status"></div>
+        </div>
+
+        <div id="hostedPanel" class="section" style="margin-top:10px; display:none">
+          <h3>Auctus 托管 API</h3>
+          <div id="hostedLoginForm">
+            <div class="two-col">
+              <div class="field">
+                <label>服务区域</label>
+                <select id="setupHostedRegion">
+                  <option value="auto">自动选择</option>
+                  <option value="global">海外 (Vercel)</option>
+                  <option value="cn">国内阿里云</option>
+                </select>
+              </div>
+              <div class="field">
+                <label>API 服务器地址</label>
+                <input id="setupHostedUrl" placeholder="https://api.auctus.ai 或 http://localhost:8001" value="http://localhost:8001" />
+              </div>
+            </div>
+            <div class="two-col">
+              <div class="field">
+                <label>邮箱</label>
+                <input id="setupHostedEmail" type="email" placeholder="your@email.com" />
+              </div>
+              <div class="field">
+                <label>密码</label>
+                <input id="setupHostedPassword" type="password" placeholder="密码" />
+              </div>
+            </div>
+            <div class="row" style="justify-content:space-between;align-items:center">
+              <div style="font-size:12px;color:var(--muted)">
+                还没有账号？<a href="#" id="hostedRegisterLink" style="color:var(--accent)">立即注册</a>
+              </div>
+              <button id="setupHostedLogin" type="button" class="primary">登录并获取 API Key</button>
+            </div>
+            <div id="hostedLoginStatus" class="status"></div>
+          </div>
+          <div id="hostedLoggedInPanel" style="display:none;margin-top:12px">
+            <div style="padding:12px 16px;border-radius:12px;background:rgba(60,242,139,.1);border:1px solid rgba(60,242,139,.3)">
+              <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+                <span style="font-size:20px">✓</span>
+                <span style="font-weight:600">已登录</span>
+                <span id="hostedUserEmail" style="color:var(--muted);font-size:13px"></span>
+              </div>
+              <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:12px 0">
+                <div style="text-align:center;padding:10px;background:rgba(0,0,0,.2);border-radius:8px">
+                  <div style="font-size:11px;color:var(--muted)">余额</div>
+                  <div id="hostedBalance" style="font-size:18px;font-weight:600;color:var(--good)">$0.00</div>
+                </div>
+                <div style="text-align:center;padding:10px;background:rgba(0,0,0,.2);border-radius:8px">
+                  <div style="font-size:11px;color:var(--muted)">订阅</div>
+                  <div id="hostedSubscription" style="font-size:14px;font-weight:600">无</div>
+                </div>
+                <div style="text-align:center;padding:10px;background:rgba(0,0,0,.2);border-radius:8px">
+                  <div style="font-size:11px;color:var(--muted)">API Key</div>
+                  <div id="hostedKeyStatus" style="font-size:12px;color:var(--accent2)">已配置</div>
+                </div>
+              </div>
+              <div class="row" style="justify-content:flex-end;gap:8px">
+                <button id="hostedOpenDashboard" type="button" class="ghost">打开管理后台</button>
+                <button id="hostedLogout" type="button">退出登录</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="hint" style="margin-top:14px">第 2 步：权限与角色（可选）</div>
+        <div class="two-col">
+          <div class="field">
+            <label>文件权限范围</label>
+            <select id="setupPermissionScope">
+              <option value="workspace">仅授权文件夹</option>
+              <option value="full_computer">整台电脑</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>终端命令权限</label>
+            <select id="setupTerminalAccess">
+              <option value="disabled">关闭</option>
+              <option value="enabled">允许</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="two-col">
+          <div class="field">
+            <label>伙伴的名字（Agent Name）</label>
+            <input id="setupAgentName" placeholder="例如：小助手 / Nova / R1" />
+          </div>
+          <div class="field">
+            <label>AI 性格（Persona）</label>
+            <select id="setupPersona">
+              <option value="professional">专业简洁</option>
+              <option value="cool">高冷御姐</option>
+              <option value="uncle">知心大叔</option>
+              <option value="bro">可靠小哥</option>
+              <option value="girl">元气萌妹</option>
+            </select>
+          </div>
+        </div>
+        <div class="field">
+          <label>一句话自我介绍（可选）</label>
+          <input id="setupUserIntro" placeholder="例如：我在做一个本地 Agent 项目，希望你尽量结构化输出。" />
+        </div>
+        <label style="display:flex;align-items:center;gap:10px;color:var(--muted);font-size:12px">
+          <input id="setupSaveProfile" type="checkbox" style="width:18px;height:18px" />
+          把以上信息写入"候选记忆"（之后可确认/拒绝）
+        </label>
+
+        <div class="hint" style="margin-top:14px">第 3 步：使用方式选择（可选）</div>
+        <div class="grid" id="usageModeGrid">
+          <div class="card-choice active" data-usage="web">
+            <strong>本地网页</strong>
+            <span>通过浏览器访问本机运行的 Web 界面（默认）。</span>
+          </div>
+          <div class="card-choice" data-usage="telegram">
+            <strong>Telegram Bot</strong>
+            <span>通过 Telegram 与 Agent 对话（需要配置 Bot Token）。</span>
+          </div>
+          <div class="card-choice" data-usage="lan">
+            <strong>局域网访问</strong>
+            <span>在同一网络下的其他设备访问（需配置防火墙）。</span>
+          </div>
+        </div>
+        <div id="usageModeInfo" style="margin-top:8px;padding:10px 12px;background:rgba(255,255,255,.04);border-radius:8px;font-size:12px;color:var(--muted)">
+          当前访问地址：<code id="currentWebUrl">http://localhost:8080</code>
+        </div>
+
+        <div class="wizard-actions">
+          <div class="error" id="wizardError"></div>
+          <div style="display:flex; gap:10px">
+            <button id="wizardFinish" class="primary" type="button">完成设置</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Permission modal -->
+  <div id="permissionModal" class="modal" aria-label="权限确认">
+    <div class="modal-card">
+      <h3 id="permissionTitle">需要权限</h3>
+      <p id="permissionText">这个任务需要执行终端命令。是否授权？</p>
+      <div class="modal-actions">
+        <button id="permNo" type="button">拒绝</button>
+        <button id="permOnce" type="button">仅本次</button>
+        <button id="permAlways" class="primary" type="button">始终允许</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // ====== tiny helpers ======
+    const $ = (id) => document.getElementById(id);
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+    const esc = (s) => (s || '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+    const state = {
+      sessionId: localStorage.getItem('auctus.sid') || '',
+      // “仅本次/拒绝”属于一次性授权，不持久化；“始终允许”会写入后端设置（本地）
+      terminalPermission: '',
+      calendarPermission: '',
+      filePermission: '',
+      mode: localStorage.getItem('auctus.mode') || 'companion', // companion | capsule
+      pendingMessage: '',
+      pendingPermissionRequest: null, // {type, message, options}
+      aborter: null,
+      logPoller: null,
+      lastLogStamp: '',
+      awaitingChoice: null, // {type, prompt, options:[{label,raw}]}
+      awaitingConfirm: null, // {type, prompt, yesLabel, yesMessage, noMessage}
+      stopRequested: false,
+    };
+
+    function setComposerHintForChoice(){
+      const hasChoice = !!state.awaitingChoice;
+      const hasConfirm = !!state.awaitingConfirm;
+      $('message').placeholder = hasChoice
+        ? '请选择一个选项（也可以直接点下面的按钮）…'
+        : (hasConfirm ? '请确认执行还是取消（也可以点下面的按钮）…' : '像对一个伙伴下指令：例如“读取 test_prd.md 并生成总结”');
+    }
+
+    function setBusy(on){
+      document.body.classList.toggle('busy', !!on);
+      $('statusText').textContent = on ? '处理中…' : '待命';
+      $('coreLabel').textContent = on ? 'THINKING' : 'READY';
+      $('coreLabel').style.opacity = on ? '1' : '0';
+      $('sendBtn').disabled = !!on;
+      $('stopBtn').disabled = !on;
+      $('stateFlow').classList.toggle('open', !!on);
+      if (!on){
+        if (state.aborter){ try{ state.aborter.abort(); }catch(e){} }
+        state.aborter = null;
+        if (state.logPoller){ clearInterval(state.logPoller); state.logPoller = null; }
+        $('stateFlow').innerHTML = '';
+      }
+    }
+
+    function applyMode(){
+      document.body.classList.toggle('capsule', state.mode === 'capsule');
+      localStorage.setItem('auctus.mode', state.mode);
+      trimMessagesIfCapsule();
+    }
+
+    function trimMessagesIfCapsule(){
+      if (state.mode !== 'capsule') return;
+      const maxNodes = 42; // 轻量化：只保留最近若干条 DOM 节点（消息+meta+快捷按钮）
+      const root = $('messages');
+      while (root.children.length > maxNodes){
+        root.removeChild(root.firstElementChild);
+      }
+    }
+
+    function autoGrow(el){
+      el.style.height = '0px';
+      const h = Math.min(el.scrollHeight, 160);
+      el.style.height = h + 'px';
+    }
+
+    // success chime (WebAudio)
+    let audioCtx = null;
+    function chime(){
+      try{
+        audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+        const t0 = audioCtx.currentTime;
+        const gain = audioCtx.createGain();
+        gain.gain.setValueAtTime(0.0001, t0);
+        gain.gain.exponentialRampToValueAtTime(0.18, t0 + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.22);
+        gain.connect(audioCtx.destination);
+
+        const osc1 = audioCtx.createOscillator();
+        osc1.type = 'sine';
+        osc1.frequency.setValueAtTime(740, t0);
+        osc1.frequency.exponentialRampToValueAtTime(988, t0 + 0.12);
+        osc1.connect(gain);
+        osc1.start(t0);
+        osc1.stop(t0 + 0.24);
+      }catch(e){}
+    }
+
+    function isAmbiguousConfirm(text){
+      const t = (text || '').trim();
+      if (!t) return false;
+      // 常见“模糊确认词”，用于承接追问时触发澄清，而不是结束对话
+      return /^(好|好的|行|可以|可以的|ok|OK|嗯|嗯嗯|是|是的|对|对的|没问题|继续|收到)[!！。\.]*$/.test(t);
+    }
+
+    function extractFirstFilename(text){
+      const t = text || '';
+      // 优先解析 **1.md** 或 `1.md`
+      const m1 = t.match(/\*\*([^*]{1,120}\.[a-zA-Z0-9]{1,6})\*\*/);
+      if (m1 && m1[1]) return m1[1].trim();
+      const m2 = t.match(/`([^`]{1,120}\.[a-zA-Z0-9]{1,6})`/);
+      if (m2 && m2[1]) return m2[1].trim();
+      return '';
+    }
+
+    function extractFolderName(text){
+      const t = text || '';
+      // 解析 “**test** — 文件夹” 或 “test 文件夹”
+      const m1 = t.match(/📁\s*\*\*([^*]{1,60})\*\*/);
+      if (m1 && m1[1]) return m1[1].trim();
+      const m2 = t.match(/([A-Za-z0-9_\-\u4e00-\u9fa5]{1,60})\s*文件夹/);
+      if (m2 && m2[1]) return m2[1].trim();
+      return '';
+    }
+
+    function detectFolderChoicesFromText(text){
+      const lines = (text || '').split(/\r?\n/);
+      const found = [];
+      for (const line of lines){
+        if (!line.includes('📁')) continue;
+        // 尝试解析：📁 **test** — ...
+        const m = line.match(/\*\*([^*]{1,60})\*\*/);
+        const name = (m && m[1]) ? m[1].trim() : '';
+        if (name && !found.includes(name)) found.push(name);
+      }
+      return found.slice(0, 6);
+    }
+
+    function maybeEnterAwaitingChoiceFromAgent(text){
+      // 针对“需要我进一步查看哪个文件夹里的内容吗？”这种追问：解析候选文件夹并进入待选择状态
+      const hasQuestion = /[?？]\s*$/.test((text || '').trim()) || /哪个文件夹/.test(text || '');
+      const folderChoices = detectFolderChoicesFromText(text || '');
+      if (hasQuestion && folderChoices.length){
+        state.awaitingChoice = {type:'folder', prompt: '请选择要继续查看的文件夹：', options: folderChoices.map(x => ({label:x, raw:x}))};
+        setComposerHintForChoice();
+        return true;
+      }
+      return false;
+    }
+
+    function maybeEnterAwaitingConfirmFromAgent(text){
+      // 针对“要删掉它吗？”这类确认问题：给出明确的“执行/取消”按钮，避免用户回复“好”后断档
+      const t = (text || '').trim();
+      const looksLikeConfirm = /要.+吗[？?]$/.test(t) || /要删(掉)?它吗[？?]$/.test(t) || /要删除.*吗[？?]$/.test(t);
+      if (!looksLikeConfirm) return false;
+
+      const filename = extractFirstFilename(t);
+      const folder = extractFolderName(t);
+      const hasDeleteIntent = /删|删除|移到废纸篓|废纸篓|回收站|trash|rm\s/.test(t);
+      if (!hasDeleteIntent) return false;
+
+      // 如果能推断出相对路径，优先用 folder/filename（默认 workspace cwd）
+      let relPath = filename;
+      if (folder && filename && !filename.includes('/') && !folder.includes('/')) relPath = `${folder}/${filename}`;
+
+      // 默认“软删除”：优先移到废纸篓/回收站，降低误删风险
+      const yesMsg = relPath
+        ? `把 ${relPath} 移到废纸篓/回收站（不要永久删除）。如需终端操作，请使用“移到废纸篓”的方式，避免 rm。`
+        : '把目标文件移到废纸篓/回收站（不要永久删除）。';
+
+      state.awaitingConfirm = {
+        type: 'delete',
+        prompt: '确认要移到废纸篓/回收站吗？（可恢复）',
+        yesLabel: '移到废纸篓',
+        yesMessage: yesMsg,
+        noMessage: '取消删除',
+      };
+      setComposerHintForChoice();
+      return true;
+    }
+
+    function clearAwaitingChoice(){
+      state.awaitingChoice = null;
+      setComposerHintForChoice();
+      // 清理残留 quick actions
+      document.querySelectorAll('.quick-actions').forEach(el => el.remove());
+    }
+
+    function clearAwaitingConfirm(){
+      state.awaitingConfirm = null;
+      setComposerHintForChoice();
+      document.querySelectorAll('.quick-actions').forEach(el => el.remove());
+    }
+
+    function renderQuickActionsForAwaitingChoice(){
+      // 删除旧的
+      document.querySelectorAll('.quick-actions').forEach(el => el.remove());
+      if (!state.awaitingChoice) return;
+
+      const bar = document.createElement('div');
+      bar.className = 'quick-actions';
+      const prompt = document.createElement('div');
+      prompt.className = 'meta';
+      prompt.style.margin = '0 auto 10px';
+      prompt.innerHTML = `<span>▸</span><span>${esc(state.awaitingChoice.prompt || '请选择：')}</span>`;
+      $('messages').appendChild(prompt);
+
+      for (const opt of state.awaitingChoice.options || []){
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'chip';
+        b.textContent = opt.label;
+        b.onclick = async () => {
+          // 统一把“选择”转成明确指令，避免 LLM 误判
+          const message = state.awaitingChoice.type === 'folder'
+            ? `打开「${opt.label}」文件夹并继续查看内容`
+            : opt.label;
+          clearAwaitingChoice();
+          await sendMessage(message);
+        };
+        bar.appendChild(b);
+      }
+
+      const cancel = document.createElement('button');
+      cancel.type = 'button';
+      cancel.className = 'cancel';
+      cancel.textContent = '取消';
+      cancel.onclick = () => {
+        addBubble('agent', '好的，已取消。本次不继续查看文件夹。你也可以直接告诉我下一步要做什么。');
+        clearAwaitingChoice();
+      };
+      bar.appendChild(cancel);
+
+      $('messages').appendChild(bar);
+      requestAnimationFrame(() => $('messages').scrollTo({top: $('messages').scrollHeight, behavior: 'smooth'}));
+      trimMessagesIfCapsule();
+    }
+
+    function renderQuickActionsForAwaitingConfirm(){
+      document.querySelectorAll('.quick-actions').forEach(el => el.remove());
+      if (!state.awaitingConfirm) return;
+
+      const bar = document.createElement('div');
+      bar.className = 'quick-actions';
+
+      const prompt = document.createElement('div');
+      prompt.className = 'meta';
+      prompt.style.margin = '0 auto 10px';
+      prompt.innerHTML = `<span>▸</span><span>${esc(state.awaitingConfirm.prompt || '请确认：')}</span>`;
+      $('messages').appendChild(prompt);
+
+      const yes = document.createElement('button');
+      yes.type = 'button';
+      yes.className = 'danger-chip';
+      yes.textContent = state.awaitingConfirm.yesLabel || '确认';
+      yes.onclick = async () => {
+        const msg = state.awaitingConfirm.yesMessage || '确认执行';
+        clearAwaitingConfirm();
+        await sendMessage(msg);
+      };
+      bar.appendChild(yes);
+
+      const cancel = document.createElement('button');
+      cancel.type = 'button';
+      cancel.className = 'cancel';
+      cancel.textContent = '取消';
+      cancel.onclick = () => {
+        addBubble('agent', '好的，已取消。');
+        clearAwaitingConfirm();
+      };
+      bar.appendChild(cancel);
+
+      $('messages').appendChild(bar);
+      requestAnimationFrame(() => $('messages').scrollTo({top: $('messages').scrollHeight, behavior: 'smooth'}));
+      trimMessagesIfCapsule();
+    }
+
+    function addBubble(role, text, files){
+      const box = document.createElement('div');
+      box.className = 'bubble ' + (role === 'user' ? 'user' : 'agent');
+      box.textContent = text || '';
+      $('messages').appendChild(box);
+      if (files && files.length){
+        const meta = document.createElement('div');
+        meta.className = 'meta';
+        meta.innerHTML = '<span>输出文件：</span>' + files.map(u => `<a class="file" href="${esc(u)}" target="_blank" rel="noopener">${esc(u.split('/').pop())}</a>`).join(' · ');
+        $('messages').appendChild(meta);
+      }
+      requestAnimationFrame(() => $('messages').scrollTo({top: $('messages').scrollHeight, behavior: 'smooth'}));
+      trimMessagesIfCapsule();
+
+      // 如果 Agent 的输出包含“选择哪个文件夹”的追问，则进入待选择态并渲染快捷按钮
+      if (role !== 'user'){
+        if (maybeEnterAwaitingChoiceFromAgent(text || '')){
+          renderQuickActionsForAwaitingChoice();
+        } else if (maybeEnterAwaitingConfirmFromAgent(text || '')){
+          renderQuickActionsForAwaitingConfirm();
+        } else if (state.awaitingChoice){
+          // 如果已不再是选择类追问，则清理待选择状态
+          //（避免用户进入下一轮对话后还残留选择态）
+          // 但仅在出现明确回答时清理；这里用较保守的策略：
+          // - 当 Agent 回复里不含“哪个文件夹/？”且不包含 📁 列表时，认为已结束选择态。
+          const hasFolderList = detectFolderChoicesFromText(text || '').length > 0;
+          const hasQuestion = /[?？]\s*$/.test((text || '').trim()) || /哪个文件夹/.test(text || '');
+          if (!hasFolderList && !hasQuestion){
+            clearAwaitingChoice();
+          }
+        } else if (state.awaitingConfirm){
+          // 若已经不再是确认问题，清理确认态
+          const stillConfirm = /要.+吗[？?]$/.test((text || '').trim());
+          if (!stillConfirm) clearAwaitingConfirm();
+        }
+      }
+    }
+
+    // ====== API ======
+    async function apiGet(path){
+      const r = await fetch(path);
+      if (!r.ok) throw new Error(await r.text());
+      return await r.json();
+    }
+    async function apiPost(path, body){
+      const r = await fetch(path, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body || {}), signal: state.aborter?.signal});
+      if (!r.ok) throw new Error(await r.text());
+      return await r.json();
+    }
+
+    // ====== Chat flow ======
+    async function sendMessage(text){
+      const msg = (text || '').trim();
+      if (!msg) return;
+
+      // 若上一轮是“需要选择”的追问，而用户只回复“好的/行/嗯”等模糊确认，则不发给后端，先让用户明确选择
+      if (state.awaitingChoice && isAmbiguousConfirm(msg)){
+        addBubble('agent', '我需要你明确选择一下：要继续查看哪个文件夹？你可以点击下面的按钮，或直接输入文件夹名称。');
+        renderQuickActionsForAwaitingChoice();
+        $('message').focus();
+        return;
+      }
+
+      // 若上一轮是“需要确认删除”等确认问题，而用户只回复“好的/行/嗯”等模糊确认：
+      if (state.awaitingConfirm && isAmbiguousConfirm(msg)){
+        addBubble('agent', '我理解你是同意继续，但为了避免误操作：请点击“删除”或“取消”。');
+        renderQuickActionsForAwaitingConfirm();
+        $('message').focus();
+        return;
+      }
+
+      // 用户直接输入了某个候选项名称：转换为更明确的指令再发送
+      if (state.awaitingChoice){
+        const options = (state.awaitingChoice.options || []).map(o => o.label);
+        const hit = options.find(o => o.toLowerCase() === msg.toLowerCase());
+        if (hit){
+          clearAwaitingChoice();
+          return await sendMessage(`打开「${hit}」文件夹并继续查看内容`);
+        }
+      }
+
+      // 用户在确认态下输入了“删除/取消”等关键词：转换为按钮同等动作
+      if (state.awaitingConfirm){
+        const low = msg.toLowerCase();
+        if (/^(删|删除|确认|是|是的|yes|y)$/.test(low)){
+          const m = state.awaitingConfirm.yesMessage || msg;
+          clearAwaitingConfirm();
+          return await sendMessage(m);
+        }
+        if (/^(不|不要|取消|否|no|n)$/.test(low)){
+          addBubble('agent', '好的，已取消。');
+          clearAwaitingConfirm();
+          return;
+        }
+      }
+
+      addBubble('user', msg);
+      $('message').value = '';
+      autoGrow($('message'));
+      setBusy(true);
+      state.aborter = new AbortController();
+      state.stopRequested = false;
+      startLogFlow();
+
+      try{
+        const payload = {
+          session_id: state.sessionId || null,
+          message: msg,
+          terminal_permission: state.terminalPermission || null,
+          calendar_permission: state.calendarPermission || null,
+          file_permission: state.filePermission || null,
+        };
+        const out = await apiPost('/api/chat', payload);
+        state.sessionId = out.session_id;
+        localStorage.setItem('auctus.sid', state.sessionId);
+
+        if (out.permission_request){
+          state.pendingMessage = msg;
+          openPermissionModal(out.permission_request);
+          return;
+        }
+
+        // 已收到有效回复，清理选择态（避免残留）
+        if (state.awaitingChoice) clearAwaitingChoice();
+        if (state.awaitingConfirm) clearAwaitingConfirm();
+        // 任务已完成（拿到最终回复），清理一次性权限，避免下次“误继承”
+        state.terminalPermission = '';
+        state.calendarPermission = '';
+        state.filePermission = '';
+
+        addBubble('agent', out.reply || '（无输出）', out.files || []);
+        if ((out.reply || '').trim()) chime();
+      }catch(e){
+        if (e?.name === 'AbortError'){
+          if (state.stopRequested){
+            addBubble('agent', '已停止当前请求（你已接管）。');
+            state.stopRequested = false;
+          } else {
+            addBubble('agent', '请求已取消。');
+          }
+        } else {
+          addBubble('agent', '运行失败：' + (e?.message || String(e)));
+        }
+      }finally{
+        setBusy(false);
+      }
+    }
+
+    function openPermissionModal(req){
+      state.pendingPermissionRequest = req || {type:'unknown', message:''};
+      const type = (req && req.type) ? String(req.type) : 'unknown';
+      const titles = {
+        terminal: '需要终端命令权限',
+        calendar: '需要日历权限',
+        files: '需要文件权限',
+      };
+      $('permissionTitle').textContent = titles[type] || '需要权限';
+      $('permissionText').textContent = (req && req.message) ? req.message : '这个任务需要额外权限。是否授权？';
+      $('permissionModal').classList.add('open');
+      setBusy(false);
+    }
+    function closePermissionModal(){
+      $('permissionModal').classList.remove('open');
+    }
+    async function resolvePermission(choice){
+      closePermissionModal();
+      const type = (state.pendingPermissionRequest && state.pendingPermissionRequest.type) ? String(state.pendingPermissionRequest.type) : 'terminal';
+      if (type === 'calendar'){
+        state.calendarPermission = choice;
+      } else if (type === 'files'){
+        state.filePermission = choice;
+      } else {
+        state.terminalPermission = choice;
+      }
+      state.pendingPermissionRequest = null;
+      // resend the pending message
+      const pending = state.pendingMessage;
+      state.pendingMessage = '';
+      await sleep(60);
+      await sendMessage(pending);
+    }
+
+    async function startLogFlow(){
+      // “透明实验室”式状态流：任务执行期间轮询日志，给用户可见的进度暗示
+      $('stateFlow').innerHTML = `<div class="chip"><span class="dot" style="width:7px;height:7px;background:var(--accent2)"></span><span>正在准备…</span></div>`;
+      state.lastLogStamp = '';
+      if (state.logPoller) clearInterval(state.logPoller);
+      state.logPoller = setInterval(async () => {
+        try{
+          const j = await apiGet('/api/logs?tail=8');
+          const items = (j.items || []).filter(x => x && x.tool_name);
+          if (!items.length) return;
+          const last = items[items.length - 1];
+          const stamp = `${last.time || ''}-${last.tool_name || ''}-${last.status || ''}`;
+          if (stamp === state.lastLogStamp) return;
+          state.lastLogStamp = stamp;
+          const tool = esc(last.tool_name || '');
+          const status = esc(last.status || '');
+          $('stateFlow').innerHTML = `<div class="chip"><span class="dot" style="width:7px;height:7px;background:var(--accent2)"></span><span>执行中：</span><code>${tool}</code><span class="muted" style="margin-left:6px">${status}</span></div>`;
+        }catch(e){}
+      }, 900);
+    }
+
+    // ====== Settings ======
+    function openSettings(){
+      $('backdrop').classList.add('open');
+      $('sheet').classList.add('open');
+      refreshSettings().catch(()=>{});
+    }
+    function closeSettings(){
+      $('backdrop').classList.remove('open');
+      $('sheet').classList.remove('open');
+    }
+
+    function setStatus(id, text, kind){
+      const el = $(id);
+      el.textContent = text || '';
+      el.className = 'status' + (kind ? ' ' + kind : '');
+    }
+
+    async function refreshSettings(){
+      const [modelInfo, routeInfo, langInfo, permInfo, termInfo, calInfo, wsInfo, keysInfo] = await Promise.all([
+        apiGet('/api/model'),
+        apiGet('/api/route'),
+        apiGet('/api/language'),
+        apiGet('/api/permission-scope'),
+        apiGet('/api/terminal-access'),
+        apiGet('/api/calendar-access'),
+        apiGet('/api/workspace'),
+        apiGet('/api/api-keys'),
+      ]);
+
+      // models
+      const mSel = $('model');
+      mSel.innerHTML = '';
+      (modelInfo.available || []).forEach(m => {
+        const opt = document.createElement('option');
+        opt.value = m; opt.textContent = m;
+        if (m === modelInfo.model) opt.selected = true;
+        mSel.appendChild(opt);
+      });
+
+      // route
+      const rSel = $('route');
+      rSel.innerHTML = '';
+      (routeInfo.available || []).forEach(r => {
+        const opt = document.createElement('option');
+        opt.value = r; opt.textContent = r;
+        if (r === routeInfo.route) opt.selected = true;
+        rSel.appendChild(opt);
+      });
+
+      // providers
+      const pSel = $('provider');
+      pSel.innerHTML = '';
+      (keysInfo.providers || []).forEach(p => {
+        const opt = document.createElement('option');
+        opt.value = p; opt.textContent = p;
+        pSel.appendChild(opt);
+      });
+
+      // language & permissions
+      $('uiMode').value = state.mode === 'capsule' ? 'capsule' : 'companion';
+      $('systemLanguage').value = langInfo.language || 'zh';
+      $('permissionScope').value = permInfo.scope || 'workspace';
+      $('terminalAccess').value = termInfo.access || 'enabled';
+      $('calendarAccess').value = calInfo.access || 'disabled';
+      $('workspacePath').value = wsInfo.workspace || '';
+      setStatus('permissionStatus', `权限：${permInfo.label || ''} · 终端：${termInfo.label || ''} · 日历：${calInfo.label || ''}`, ''); 
+
+      await refreshMemories().catch(()=>{});
+      await refreshLogs().catch(()=>{});
+    }
+
+    async function refreshMemories(){
+      const j = await apiGet('/api/memories?candidates=true');
+      const wrap = $('memories');
+      wrap.innerHTML = '';
+      const items = j.items || [];
+      if (!items.length){
+        const div = document.createElement('div');
+        div.className = 'muted';
+        div.textContent = '暂无候选记忆。';
+        wrap.appendChild(div);
+        return;
+      }
+      items.slice(0, 30).forEach(item => {
+        const card = document.createElement('div');
+        card.className = 'section';
+        const title = esc(item.title || item.key || '记忆');
+        const content = esc(item.content || item.value || '');
+        card.innerHTML = `<div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start">
+          <div style="min-width:0">
+            <div style="font-weight:650">${title}</div>
+            <div class="muted" style="margin-top:6px;white-space:pre-wrap">${content}</div>
+          </div>
+          <div style="display:flex;gap:8px;flex-shrink:0">
+            <button data-act="reject">拒绝</button>
+            <button class="primary" data-act="confirm">确认</button>
+          </div>
+        </div>`;
+        card.querySelector('[data-act="confirm"]').onclick = async () => {
+          await apiPost(`/api/memories/${encodeURIComponent(item.id)}/confirm`, {});
+          await refreshMemories();
+        };
+        card.querySelector('[data-act="reject"]').onclick = async () => {
+          await apiPost(`/api/memories/${encodeURIComponent(item.id)}/reject`, {});
+          await refreshMemories();
+        };
+        wrap.appendChild(card);
+      });
+    }
+
+    async function refreshLogs(){
+      const j = await apiGet('/api/logs?tail=30');
+      const wrap = $('logs');
+      wrap.innerHTML = '';
+      const items = j.items || [];
+      if (!items.length){
+        const div = document.createElement('div');
+        div.className = 'muted';
+        div.textContent = '暂无日志。';
+        wrap.appendChild(div);
+        return;
+      }
+      items.reverse().forEach(item => {
+        const card = document.createElement('div');
+        card.className = 'section';
+        const tool = esc(item.tool_name || 'tool');
+        const status = esc(item.status || '');
+        const t = esc(item.time || '');
+        card.innerHTML = `<div style="display:flex;justify-content:space-between;gap:10px;align-items:center">
+          <div style="min-width:0">
+            <div style="font-weight:650">${tool} <span class="muted" style="font-weight:500">(${status})</span></div>
+            <div class="muted" style="margin-top:4px;font-family:var(--mono);font-size:11px">${t}</div>
+          </div>
+          <button class="ghost" type="button">详情</button>
+        </div>
+        <pre style="display:none;margin:10px 0 0;white-space:pre-wrap;word-break:break-word;color:rgba(234,240,255,.78);font-family:var(--mono);font-size:11px;line-height:1.45"></pre>`;
+        const pre = card.querySelector('pre');
+        card.querySelector('button').onclick = () => {
+          const open = pre.style.display !== 'none';
+          pre.style.display = open ? 'none' : 'block';
+          if (!open && !pre.textContent){
+            pre.textContent = JSON.stringify(item, null, 2);
+          }
+        };
+        wrap.appendChild(card);
+      });
+    }
+
+    // ====== Folder picker ======
+    let folderState = {path: null, parent: null};
+    async function openFolderPicker(path){
+      $('folderOverlay').classList.add('open');
+      await loadFolder(path);
+    }
+    function closeFolderPicker(){ $('folderOverlay').classList.remove('open'); }
+    async function loadFolder(path){
+      const j = await apiGet(path ? `/api/folders?path=${encodeURIComponent(path)}` : '/api/folders');
+      folderState.path = j.path;
+      folderState.parent = j.parent;
+      $('folderPath').textContent = j.path;
+      const list = $('folderList');
+      list.innerHTML = '';
+      (j.items || []).forEach(item => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.style.borderRadius = '14px';
+        btn.style.width = '100%';
+        btn.style.justifyContent = 'space-between';
+        btn.style.display = 'flex';
+        btn.style.alignItems = 'center';
+        btn.style.gap = '10px';
+        btn.style.padding = '10px 12px';
+        btn.innerHTML = `<span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">📁 ${esc(item.name)}</span>
+                         <span class="muted" style="font-size:11px">${item.readable ? '可读' : '不可读'}</span>`;
+        btn.disabled = !item.readable;
+        btn.onclick = () => loadFolder(item.path);
+        list.appendChild(btn);
+      });
+    }
+
+    // ====== Onboarding (install UI) ======
+    function openWizard(){ $('wizardOverlay').classList.add('open'); }
+    function closeWizard(){ $('wizardOverlay').classList.remove('open'); }
+
+    function setModeCards(mode){
+      document.querySelectorAll('#modeGrid .card-choice').forEach(el => {
+        el.classList.toggle('active', el.dataset.mode === mode);
+      });
+      $('ownApiPanel').style.display = mode === 'own_api' ? '' : 'none';
+      $('hostedPanel').style.display = mode === 'hosted_api' ? '' : 'none';
+    }
+
+    async function initWizard(){
+      const [onb, modelInfo, keysInfo] = await Promise.all([
+        apiGet('/api/onboarding'),
+        apiGet('/api/model'),
+        apiGet('/api/api-keys'),
+      ]);
+      const completed = !!onb.completed;
+      // prefill
+      $('setupLanguage').value = onb.system_language || 'zh';
+      $('setupPermissionScope').value = onb.permission_scope || 'workspace';
+      $('setupTerminalAccess').value = onb.terminal_access || 'enabled';
+      $('setupHostedRegion').value = onb.hosted_region || 'auto';
+      $('setupHostedUrl').value = onb.hosted_base_url || 'http://localhost:8001';
+      $('setupAgentName').value = onb.agent_name || '';
+      $('setupPersona').value = onb.persona || 'professional';
+
+      const mSel = $('setupModel');
+      mSel.innerHTML = '';
+      (modelInfo.available || []).forEach(m => {
+        const opt = document.createElement('option');
+        opt.value = m; opt.textContent = m;
+        if (m === (onb.model || modelInfo.model)) opt.selected = true;
+        mSel.appendChild(opt);
+      });
+
+      const pSel = $('setupProvider');
+      pSel.innerHTML = '';
+      (keysInfo.providers || []).forEach(p => {
+        const opt = document.createElement('option');
+        opt.value = p; opt.textContent = p;
+        pSel.appendChild(opt);
+      });
+
+      // Load saved hosted session if exists
+      try {
+        const saved = localStorage.getItem('auctus.hosted_session');
+        if (saved) {
+          hostedSession = JSON.parse(saved);
+          if (onb.hosted_email) {
+            $('setupHostedEmail').value = onb.hosted_email;
+          }
+          updateHostedUI();
+          // Also update the logged-in panel with saved data
+          if (hostedSession && hostedSession.token) {
+            $('hostedUserEmail').textContent = hostedSession.email || '';
+          }
+        }
+      } catch(e) {}
+
+      const mode = (onb.mode || 'own_api').trim() || 'own_api';
+      setModeCards(mode);
+      $('wizardError').textContent = '';
+
+      if (!completed) openWizard();
+    }
+
+    async function validateKey(provider, apiKey, model, statusId){
+      try{
+        setStatus(statusId, '验证中…', '');
+        await apiPost('/api/api-keys/validate', {provider, api_key: apiKey, model});
+        setStatus(statusId, '验证成功 ✓', 'good');
+        return true;
+      }catch(e){
+        setStatus(statusId, '验证失败：' + (e?.message || String(e)), 'bad');
+        return false;
+      }
+    }
+
+    async function finishOnboarding(){
+      const mode = document.querySelector('#modeGrid .card-choice.active')?.dataset.mode || 'own_api';
+
+      // For hosted_api, ensure we have a valid session
+      if (mode === 'hosted_api') {
+        if (!hostedSession || !hostedSession.token) {
+          $('wizardError').textContent = '请先登录 Auctus 托管 API 账号。';
+          return;
+        }
+      }
+
+      const payload = {
+        mode,
+        model: $('setupModel').value,
+        provider: mode === 'own_api' ? $('setupProvider').value : (mode === 'hosted_api' ? 'auctus_hosted' : null),
+        api_key: mode === 'own_api' ? $('setupApiKey').value.trim() : (mode === 'hosted_api' ? hostedSession.api_key : null),
+        hosted_email: mode === 'hosted_api' ? hostedSession.email : null,
+        hosted_region: mode === 'hosted_api' ? hostedSession.region : null,
+        hosted_base_url: mode === 'hosted_api' ? hostedSession.base_url : null,
+        agent_name: $('setupAgentName').value.trim(),
+        persona: $('setupPersona').value,
+        system_language: $('setupLanguage').value,
+        user_intro: $('setupUserIntro').value.trim(),
+        permission_scope: $('setupPermissionScope').value,
+        terminal_access: $('setupTerminalAccess').value,
+        save_profile: $('setupSaveProfile').checked,
+      };
+
+      $('wizardError').textContent = '';
+      if (mode === 'own_api'){
+        if (!payload.provider || !payload.api_key){
+          $('wizardError').textContent = '请填写 Provider 和 API key。';
+          return;
+        }
+        const ok = await validateKey(payload.provider, payload.api_key, payload.model, 'setupKeyStatus');
+        if (!ok) return;
+      }
+      if (mode === 'hosted_api' && !payload.hosted_email){
+        $('wizardError').textContent = '请填写登录邮箱。';
+        return;
+      }
+
+      try{
+        $('wizardFinish').disabled = true;
+        $('wizardFinish').textContent = '保存中…';
+        await apiPost('/api/onboarding', payload);
+        closeWizard();
+        chime();
+        await refreshSettings().catch(()=>{});
+      }catch(e){
+        $('wizardError').textContent = '保存失败：' + (e?.message || String(e));
+      }finally{
+        $('wizardFinish').disabled = false;
+        $('wizardFinish').textContent = '完成设置';
+      }
+    }
+
+    // ====== bind events ======
+    applyMode();
+
+    $('stopBtn').onclick = () => {
+      // UI 级紧急停止：中断当前请求（不会影响后端进程，但能立刻把控制权交回用户）
+      try{
+        state.stopRequested = true;
+        if (state.aborter) state.aborter.abort();
+      }catch(e){}
+    };
+    $('stopBtn').disabled = true;
+
+    $('openSettings').onclick = openSettings;
+    $('closeSettings').onclick = closeSettings;
+    $('backdrop').onclick = closeSettings;
+
+    $('message').addEventListener('input', () => autoGrow($('message')));
+    $('chatForm').addEventListener('submit', (e) => { e.preventDefault(); if (!$('sendBtn').disabled) sendMessage($('message').value); });
+    // 回车发送；Shift+Enter 换行
+    $('message').addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter') return;
+      // 允许 Shift+Enter 换行
+      if (e.shiftKey) return;
+      // 中文输入法合成中不发送
+      if (e.isComposing) return;
+      e.preventDefault();
+      if (!$('sendBtn').disabled) sendMessage($('message').value);
+    });
+
+    // “换行”按钮：在光标处插入 \n
+    $('newlineBtn').onclick = () => {
+      const el = $('message');
+      const start = el.selectionStart ?? el.value.length;
+      const end = el.selectionEnd ?? el.value.length;
+      const before = el.value.slice(0, start);
+      const after = el.value.slice(end);
+      el.value = before + "\n" + after;
+      const pos = start + 1;
+      el.selectionStart = el.selectionEnd = pos;
+      el.focus();
+      autoGrow(el);
+    };
+
+    $('permNo').onclick = () => resolvePermission('no');
+    $('permOnce').onclick = () => resolvePermission('once');
+    $('permAlways').onclick = () => resolvePermission('always');
+
+    // settings actions
+    $('saveModel').onclick = async () => {
+      try{
+        await apiPost('/api/model', {model: $('model').value});
+        setStatus('keyStatus', '已切换模型。', 'good');
+      }catch(e){ setStatus('keyStatus', '切换失败：' + (e?.message || String(e)), 'bad'); }
+    };
+    $('saveRoute').onclick = async () => {
+      try{
+        await apiPost('/api/route', {route: $('route').value});
+        setStatus('keyStatus', '已保存路由。', 'good');
+      }catch(e){ setStatus('keyStatus', '保存失败：' + (e?.message || String(e)), 'bad'); }
+    };
+    $('validateKey').onclick = async () => {
+      await validateKey($('provider').value, $('apiKey').value.trim(), $('model').value, 'keyStatus');
+    };
+    $('saveKey').onclick = async () => {
+      const provider = $('provider').value;
+      const api_key = $('apiKey').value.trim();
+      if (!api_key){ setStatus('keyStatus', '请先粘贴 API key。', 'bad'); return; }
+      const ok = await validateKey(provider, api_key, $('model').value, 'keyStatus');
+      if (!ok) return;
+      try{
+        await apiPost('/api/api-keys', {provider, api_key});
+        $('apiKey').value = '';
+        setStatus('keyStatus', '已保存 ✓（并切换到 byo 路由）', 'good');
+      }catch(e){ setStatus('keyStatus', '保存失败：' + (e?.message || String(e)), 'bad'); }
+    };
+    $('saveLanguage').onclick = async () => {
+      try{
+        await apiPost('/api/language', {language: $('systemLanguage').value});
+        setStatus('permissionStatus', '语言已保存。', 'good');
+      }catch(e){ setStatus('permissionStatus', '保存失败：' + (e?.message || String(e)), 'bad'); }
+    };
+    $('saveUiMode').onclick = () => {
+      state.mode = $('uiMode').value === 'capsule' ? 'capsule' : 'companion';
+      applyMode();
+      setStatus('permissionStatus', '界面模式已保存。', 'good');
+    };
+    $('savePermissionScope').onclick = async () => {
+      try{
+        const j = await apiPost('/api/permission-scope', {scope: $('permissionScope').value});
+        setStatus('permissionStatus', `权限：${j.label || ''}`, 'good');
+      }catch(e){ setStatus('permissionStatus', '保存失败：' + (e?.message || String(e)), 'bad'); }
+    };
+    $('saveTerminalAccess').onclick = async () => {
+      try{
+        const j = await apiPost('/api/terminal-access', {access: $('terminalAccess').value});
+        setStatus('permissionStatus', `终端：${j.label || ''}`, 'good');
+      }catch(e){ setStatus('permissionStatus', '保存失败：' + (e?.message || String(e)), 'bad'); }
+    };
+    $('saveCalendarAccess').onclick = async () => {
+      try{
+        const j = await apiPost('/api/calendar-access', {access: $('calendarAccess').value});
+        setStatus('permissionStatus', `日历：${j.label || ''}`, 'good');
+      }catch(e){ setStatus('permissionStatus', '保存失败：' + (e?.message || String(e)), 'bad'); }
+    };
+    $('saveWorkspace').onclick = async () => {
+      try{
+        const j = await apiPost('/api/workspace', {path: $('workspacePath').value.trim()});
+        setStatus('workspaceStatus', '已授权：' + (j.workspace || ''), 'good');
+      }catch(e){ setStatus('workspaceStatus', '授权失败：' + (e?.message || String(e)), 'bad'); }
+    };
+    $('pickFolder').onclick = () => openFolderPicker(folderState.path).catch(()=>{});
+    $('folderClose').onclick = closeFolderPicker;
+    $('folderUp').onclick = () => folderState.parent ? loadFolder(folderState.parent) : null;
+    $('folderUse').onclick = () => { $('workspacePath').value = folderState.path || ''; closeFolderPicker(); };
+
+    // email accounts
+    const IMAP_PRESETS = {};
+    async function loadEmailAccounts() {
+      try {
+        const j = await apiGet('/api/email-accounts');
+        Object.assign(IMAP_PRESETS, j.providers || {});
+        const list = document.getElementById('emailAccountList');
+        list.innerHTML = '';
+        (j.items || []).forEach(acc => {
+          const card = document.createElement('div');
+          card.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:8px 10px;background:rgba(255,255,255,.06);border-radius:8px;gap:8px;font-size:13px';
+          card.innerHTML = `<span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${acc.email_address}">${acc.label || acc.email_address}</span>
+            <span style="color:rgba(234,240,255,.45);font-size:11px;white-space:nowrap">${acc.imap_host}</span>
+            <button data-id="${acc.id}" class="emailTestBtn ghost" type="button" style="font-size:11px;padding:2px 8px">测试</button>
+            <button data-id="${acc.id}" class="emailDelBtn ghost" type="button" style="font-size:11px;padding:2px 8px;color:#f87171">删除</button>`;
+          list.appendChild(card);
+        });
+        list.querySelectorAll('.emailTestBtn').forEach(btn => {
+          btn.onclick = async () => {
+            btn.disabled = true; btn.textContent = '…';
+            try {
+              const r = await apiPost(`/api/email-accounts/${btn.dataset.id}/test`, {});
+              btn.textContent = r.ok ? '✓ 连通' : '✗ 失败';
+              btn.style.color = r.ok ? '#4ade80' : '#f87171';
+              if (!r.ok) setStatus('emailStatus', r.error || '连接失败', 'bad');
+            } catch(e) { btn.textContent = '✗'; btn.style.color='#f87171'; }
+            finally { btn.disabled = false; }
+          };
+        });
+        list.querySelectorAll('.emailDelBtn').forEach(btn => {
+          btn.onclick = async () => {
+            if (!confirm('确认删除此邮件账户？')) return;
+            try { await fetch(`/api/email-accounts/${btn.dataset.id}`, {method:'DELETE'}); await loadEmailAccounts(); }
+            catch(e) { setStatus('emailStatus', '删除失败', 'bad'); }
+          };
+        });
+      } catch(e) {}
+    }
+    $('emailProvider').onchange = () => {
+      const preset = IMAP_PRESETS[$('emailProvider').value];
+      const manual = !preset;
+      $('emailImapFields').style.display = manual ? 'grid' : 'none';
+      if (preset) {
+        $('emailImapHost').value = preset.imap_host || '';
+        $('emailImapPort').value = preset.imap_port || 993;
+      }
+    };
+    function collectEmailForm() {
+      const provider = $('emailProvider').value;
+      const preset = IMAP_PRESETS[provider] || {};
+      return {
+        email_address: $('emailAddress').value.trim(),
+        password: $('emailPassword').value,
+        imap_host: ($('emailImapHost').value.trim() || preset.imap_host || ''),
+        imap_port: parseInt($('emailImapPort').value || '993'),
+        imap_ssl: true,
+        smtp_host: preset.smtp_host || '',
+        smtp_port: preset.smtp_port || 465,
+        smtp_ssl: preset.smtp_ssl !== false,
+      };
+    }
+    $('testEmailBtn').onclick = async () => {
+      const payload = collectEmailForm();
+      if (!payload.email_address || !payload.password || !payload.imap_host) {
+        setStatus('emailStatus', '请填写邮箱地址、密码和 IMAP 服务器。', 'bad'); return;
+      }
+      setStatus('emailStatus', '连接测试中…', '');
+      try {
+        const tmp = await apiPost('/api/email-accounts', {...payload, label: '__test__'});
+        const r = await apiPost(`/api/email-accounts/${tmp.id}/test`, {});
+        await fetch(`/api/email-accounts/${tmp.id}`, {method:'DELETE'});
+        setStatus('emailStatus', r.ok ? '连接成功 ✓' : ('连接失败：' + (r.error || '')), r.ok ? 'good' : 'bad');
+      } catch(e) { setStatus('emailStatus', '测试失败：' + (e?.message || String(e)), 'bad'); }
+    };
+    $('saveEmailBtn').onclick = async () => {
+      const payload = collectEmailForm();
+      if (!payload.email_address || !payload.password || !payload.imap_host) {
+        setStatus('emailStatus', '请填写邮箱地址、密码和 IMAP 服务器。', 'bad'); return;
+      }
+      try {
+        await apiPost('/api/email-accounts', payload);
+        $('emailAddress').value = ''; $('emailPassword').value = '';
+        $('emailAddForm').removeAttribute('open');
+        setStatus('emailStatus', '已添加邮件账户 ✓', 'good');
+        await loadEmailAccounts();
+      } catch(e) { setStatus('emailStatus', '保存失败：' + (e?.message || String(e)), 'bad'); }
+    };
+    loadEmailAccounts().catch(()=>{});
+
+    // ── Telegram config ──────────────────────────────────────────────────────
+    async function loadTelegramConfig() {
+      try {
+        const r = await fetch('/api/telegram/config').then(r => r.json());
+        const el = document.getElementById('tgStatus');
+        if (r.configured) {
+          el.innerHTML = `<span style="color:#22c55e;font-size:12px">● 已连接 Bot（Token: ${r.token_hint}）</span>`;
+          if (r.allowed_user_ids) document.getElementById('tgUserIds').value = r.allowed_user_ids;
+        } else {
+          el.innerHTML = '<span style="color:#aaa;font-size:12px">● 未配置 Telegram Bot</span>';
+        }
+      } catch(e) {}
+    }
+    loadTelegramConfig().catch(()=>{});
+
+    document.getElementById('tgVerifyBtn').onclick = async () => {
+      const token = document.getElementById('tgToken').value.trim();
+      if (!token) { setStatus('tgConfigStatus', '请填写 Bot Token。', 'bad'); return; }
+      setStatus('tgConfigStatus', '验证中…', '');
+      try {
+        const r = await apiPost('/api/telegram/verify-token', {bot_token: token, allowed_user_ids: ''});
+        if (r.ok) {
+          const info = document.getElementById('tgBotInfo');
+          info.textContent = `Bot：@${r.username}（${r.name}）✓`;
+          info.style.display = '';
+          setStatus('tgConfigStatus', 'Token 有效。', 'good');
+        } else {
+          setStatus('tgConfigStatus', 'Token 无效：' + (r.error || ''), 'bad');
+        }
+      } catch(e) { setStatus('tgConfigStatus', '验证失败。', 'bad'); }
+    };
+
+    document.getElementById('tgFetchIdBtn').onclick = async () => {
+      const token = document.getElementById('tgToken').value.trim();
+      if (!token) { setStatus('tgConfigStatus', '请先填写 Bot Token。', 'bad'); return; }
+      setStatus('tgConfigStatus', '读取最近消息…', '');
+      try {
+        const r = await apiPost('/api/telegram/fetch-updates', {bot_token: token, allowed_user_ids: ''});
+        if (r.ok && r.user_ids && r.user_ids.length > 0) {
+          const ids = r.user_ids.map(u => u.id).join(',');
+          document.getElementById('tgUserIds').value = ids;
+          const res = document.getElementById('tgFetchResult');
+          res.textContent = '找到用户：' + r.user_ids.map(u => `${u.name}（${u.id}）`).join('、');
+          res.style.display = '';
+          setStatus('tgConfigStatus', '已自动填入用户 ID。', 'good');
+        } else {
+          setStatus('tgConfigStatus', r.ok ? '暂无消息记录，请先给 Bot 发一条消息。' : ('获取失败：' + (r.error || '')), r.ok ? '' : 'bad');
+        }
+      } catch(e) { setStatus('tgConfigStatus', '获取失败。', 'bad'); }
+    };
+
+    document.getElementById('tgSaveBtn').onclick = async () => {
+      const token = document.getElementById('tgToken').value.trim();
+      const ids = document.getElementById('tgUserIds').value.trim();
+      if (!token) { setStatus('tgConfigStatus', '请填写 Bot Token。', 'bad'); return; }
+      if (!ids) { setStatus('tgConfigStatus', '请填写允许的用户 ID（先点"获取我的 ID"）。', 'bad'); return; }
+      setStatus('tgConfigStatus', '保存中…', '');
+      try {
+        const r = await apiPost('/api/telegram/save', {bot_token: token, allowed_user_ids: ids});
+        if (!r.ok && r.detail) { setStatus('tgConfigStatus', '保存失败：' + r.detail, 'bad'); return; }
+        const t = await apiPost('/api/telegram/test-message', {bot_token: token, allowed_user_ids: ids});
+        if (t.ok) {
+          setStatus('tgConfigStatus', '✓ 已保存，测试消息已发送，请查看手机。', 'good');
+          document.getElementById('tgToken').value = '';
+          document.getElementById('tgConfigForm').removeAttribute('open');
+          await loadTelegramConfig();
+        } else {
+          const errs = (t.results || []).filter(r => !r.ok).map(r => `${r.user_id}: ${r.error}`).join('; ');
+          setStatus('tgConfigStatus', '已保存，但测试消息发送失败：' + errs, 'bad');
+          await loadTelegramConfig();
+        }
+      } catch(e) { setStatus('tgConfigStatus', '保存失败：' + (e?.message || String(e)), 'bad'); }
+    };
+
+    $('upload').onclick = async () => {
+      const f = $('file').files && $('file').files[0];
+      if (!f){ setStatus('uploadStatus', '请选择文件。', 'bad'); return; }
+      try{
+        setStatus('uploadStatus', '上传中…', '');
+        const body = new Uint8Array(await f.arrayBuffer());
+        const r = await fetch('/api/upload?filename=' + encodeURIComponent(f.name), {method:'POST', body});
+        if (!r.ok) throw new Error(await r.text());
+        const j = await r.json();
+        setStatus('uploadStatus', `已上传：${j.filename}（${j.size} bytes）`, 'good');
+      }catch(e){ setStatus('uploadStatus', '上传失败：' + (e?.message || String(e)), 'bad'); }
+    };
+
+    $('refreshLogs').onclick = () => refreshLogs().catch(()=>{});
+
+    // wizard binds
+    document.querySelectorAll('#modeGrid .card-choice').forEach(el => {
+      el.onclick = () => {
+        document.querySelectorAll('#modeGrid .card-choice').forEach(x => x.classList.remove('active'));
+        el.classList.add('active');
+        setModeCards(el.dataset.mode);
+      };
+    });
+    $('setupValidateKey').onclick = async () => {
+      await validateKey($('setupProvider').value, $('setupApiKey').value.trim(), $('setupModel').value, 'setupKeyStatus');
+    };
+    $('wizardFinish').onclick = finishOnboarding;
+    $('wizardClose').onclick = closeWizard;
+
+    // Hosted API login
+    let hostedSession = null; // {token, email, api_key, base_url}
+
+    function updateHostedUI() {
+      if (hostedSession && hostedSession.token) {
+        $('hostedLoginForm').style.display = 'none';
+        $('hostedLoggedInPanel').style.display = '';
+        $('hostedUserEmail').textContent = hostedSession.email || '';
+      } else {
+        $('hostedLoginForm').style.display = '';
+        $('hostedLoggedInPanel').style.display = 'none';
+      }
+    }
+
+    async function hostedLogin() {
+      const email = $('setupHostedEmail').value.trim();
+      const password = $('setupHostedPassword').value;
+      const baseUrl = ($('setupHostedUrl').value || 'http://localhost:8001').replace(/\/$/, '');
+      const region = $('setupHostedRegion').value;
+
+      if (!email || !password) {
+        setStatus('hostedLoginStatus', '请填写邮箱和密码。', 'bad');
+        return;
+      }
+
+      setStatus('hostedLoginStatus', '登录中…', '');
+      try {
+        // Login to get token
+        const formData = new URLSearchParams();
+        formData.append('username', email);
+        formData.append('password', password);
+
+        const loginRes = await fetch(`${baseUrl}/auth/login`, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+          body: formData.toString()
+        });
+
+        if (!loginRes.ok) {
+          const err = await loginRes.json().catch(() => ({}));
+          throw new Error(err.detail || '登录失败，请检查邮箱和密码。');
+        }
+
+        const {access_token} = await loginRes.json();
+
+        // Get billing status
+        const billingRes = await fetch(`${baseUrl}/subscriptions/billing-status`, {
+          headers: {'Authorization': `Bearer ${access_token}`}
+        });
+        const billing = billingRes.ok ? await billingRes.json() : {};
+
+        // Get or create API key
+        const keysRes = await fetch(`${baseUrl}/api-keys/`, {
+          headers: {'Authorization': `Bearer ${access_token}`}
+        });
+        let apiKey = null;
+        if (keysRes.ok) {
+          const keys = await keysRes.json();
+          const activeKey = keys.find(k => k.status === 'active');
+          if (activeKey) {
+            // Need to get full key - create new one
+            const createRes = await fetch(`${baseUrl}/api-keys/`, {
+              method: 'POST',
+              headers: {
+                'Authorization': `Bearer ${access_token}`,
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify({name: 'Auctus Agent'})
+            });
+            if (createRes.ok) {
+              const newKey = await createRes.json();
+              apiKey = newKey.key;
+            }
+          }
+        }
+
+        if (!apiKey) {
+          // Create a new key
+          const createRes = await fetch(`${baseUrl}/api-keys/`, {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${access_token}`,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({name: 'Auctus Agent'})
+          });
+          if (!createRes.ok) throw new Error('无法创建 API Key');
+          const newKey = await createRes.json();
+          apiKey = newKey.key;
+        }
+
+        hostedSession = {
+          token: access_token,
+          email,
+          api_key: apiKey,
+          base_url: baseUrl,
+          region
+        };
+
+        // Update UI
+        $('hostedBalance').textContent = `$${(billing.balance?.amount || 0).toFixed(2)}`;
+        const sub = billing.subscription;
+        $('hostedSubscription').textContent = sub ? `${sub.plan_name} (${sub.days_remaining}天)` : '无';
+
+        updateHostedUI();
+        setStatus('hostedLoginStatus', '登录成功 ✓', 'good');
+
+        // Store in localStorage for wizard completion
+        localStorage.setItem('auctus.hosted_session', JSON.stringify(hostedSession));
+      } catch (e) {
+        setStatus('hostedLoginStatus', e.message || '登录失败', 'bad');
+      }
+    }
+
+    $('setupHostedLogin').onclick = hostedLogin;
+
+    $('hostedRegisterLink').onclick = (e) => {
+      e.preventDefault();
+      const baseUrl = ($('setupHostedUrl').value || 'http://localhost:8001').replace(/\/$/, '');
+      window.open(`${baseUrl}/static/dashboard.html`, '_blank');
+    };
+
+    $('hostedLogout').onclick = () => {
+      hostedSession = null;
+      localStorage.removeItem('auctus.hosted_session');
+      updateHostedUI();
+    };
+
+    $('hostedOpenDashboard').onclick = () => {
+      if (hostedSession) {
+        window.open(`${hostedSession.base_url}/static/dashboard.html`, '_blank');
+      }
+    };
+
+    // Load saved hosted session
+    try {
+      const saved = localStorage.getItem('auctus.hosted_session');
+      if (saved) {
+        hostedSession = JSON.parse(saved);
+        updateHostedUI();
+      }
+    } catch(e) {}
+
+    // Usage mode selection
+    let selectedUsageMode = 'web';
+    const usageModeGrid = document.getElementById('usageModeGrid');
+    const usageModeInfo = document.getElementById('usageModeInfo');
+    const currentWebUrl = document.getElementById('currentWebUrl');
+
+    // Update current URL display
+    function updateUsageModeInfo() {
+      const protocol = window.location.protocol;
+      const hostname = window.location.hostname;
+      const port = window.location.port || '8080';
+      const baseUrl = `${protocol}//${hostname}:${port}`;
+
+      if (selectedUsageMode === 'web') {
+        currentWebUrl.textContent = baseUrl;
+        usageModeInfo.innerHTML = `当前访问地址：<code>${baseUrl}</code>（本机浏览器）`;
+      } else if (selectedUsageMode === 'telegram') {
+        usageModeInfo.innerHTML = `Telegram Bot 需要在设置中配置 Bot Token。配置完成后可通过 Telegram 与 Agent 对话。`;
+      } else if (selectedUsageMode === 'lan') {
+        // Try to get local IP for LAN access
+        usageModeInfo.innerHTML = `局域网访问地址：<code>${baseUrl}</code><br><span style="color:var(--accent2)">提示：如需从其他设备访问，请确保防火墙允许端口 ${port}，并将 localhost 替换为本机 IP 地址。</span>`;
+      }
+    }
+
+    usageModeGrid.querySelectorAll('.card-choice').forEach(el => {
+      el.onclick = () => {
+        usageModeGrid.querySelectorAll('.card-choice').forEach(x => x.classList.remove('active'));
+        el.classList.add('active');
+        selectedUsageMode = el.dataset.usage;
+        updateUsageModeInfo();
+      };
+    });
+
+    // Initialize usage mode info
+    updateUsageModeInfo();
+
+    // boot
+    (async function boot(){
+      try{
+        await initWizard();
+        // preload folder picker state
+        const j = await apiGet('/api/folders');
+        folderState.path = j.path; folderState.parent = j.parent;
+      }catch(e){}
+      // initial greeting
+      addBubble('agent', '你好，我在这里。把任务交给我吧。你也可以打开右上角 ⚙ 设置，完成模型与权限配置。');
+      $('message').focus();
+      autoGrow($('message'));
+      setComposerHintForChoice();
+    })();
+  </script>
+</body>
+</html>

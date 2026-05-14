@@ -68,8 +68,14 @@ def _route_kwargs(model: str) -> dict[str, Any]:
     if route == "local":
         return {}
     if route == "proxy":
+        # Check if using auctus_hosted provider
+        hosted = accounting.get_api_key_with_metadata("auctus_hosted")
+        if hosted:
+            base_url = hosted.get("metadata", {}).get("base_url", "http://localhost:8001")
+            return {"api_base": f"{base_url}/v1", "api_key": hosted["api_key"]}
+        # Fall back to settings-based proxy config
         if not settings.proxy_base_url:
-            raise RuntimeError("LLM route is proxy, but PROXY_BASE_URL is not configured.")
+            raise RuntimeError("LLM route is proxy, but PROXY_BASE_URL is not configured and no auctus_hosted key found.")
         out = {"api_base": settings.proxy_base_url}
         if settings.proxy_api_key:
             out["api_key"] = settings.proxy_api_key

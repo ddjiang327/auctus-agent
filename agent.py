@@ -24,6 +24,7 @@ from app.agent import chat  # noqa: E402（chdir 必须在 import 之前）
 from app.config import settings
 from app import memory as mem_module
 from app import accounting
+from app import cronjobs
 from app import evolution
 from app import maintenance
 from app import relay
@@ -221,6 +222,125 @@ def _doctor(_args: argparse.Namespace) -> None:
         if message:
             line += f" ({message})"
         print(line)
+
+
+def _cron(args: argparse.Namespace) -> None:
+    if args.action == "list":
+        jobs = cronjobs.list_jobs()
+        if not jobs:
+            print("暂无 cron job。")
+            return
+        for job in jobs:
+            enabled = "enabled" if job.get("enabled") else "disabled"
+            print(f"- {job.get('id')} [{enabled}] {job.get('schedule')}  {job.get('name')}")
+            if job.get("description"):
+                print(f"  {job['description']}")
+            print(f"  script: {job.get('script_path')}")
+        return
+
+    if args.action == "add-backup":
+        script = cronjobs.template_backup_folder(source_rel=args.source, backups_rel=args.backups)
+        job = cronjobs.add_job(name=args.name, schedule=args.cron, script_body=script, description=args.desc or "自动备份文件夹")
+        print(f"已创建 cron job：{job['id']}")
+        print(f"- schedule: {job['schedule']}")
+        print(f"- script: {job['script_path']}")
+        print("下一步：运行 `python agent.py cron export` 查看 crontab 片段，或运行 `python agent.py cron apply` 写入系统 crontab。")
+        return
+
+    if args.action == "add-run":
+        script = cronjobs.template_agent_run(input_rel=args.file, task=args.task)
+        job = cronjobs.add_job(name=args.name, schedule=args.cron, script_body=script, description=args.desc or "定时运行 agent.py run")
+        print(f"已创建 cron job：{job['id']}")
+        print(f"- schedule: {job['schedule']}")
+        print(f"- script: {job['script_path']}")
+        print("下一步：运行 `python agent.py cron export` 查看 crontab 片段，或运行 `python agent.py cron apply` 写入系统 crontab。")
+        return
+
+    if args.action == "enable":
+        result = cronjobs.set_enabled(args.id, True)
+        if not result.get("ok"):
+            print(f"失败：{result.get('error')}", file=sys.stderr)
+            sys.exit(1)
+        print(f"已启用：{args.id}")
+        return
+
+    if args.action == "disable":
+        result = cronjobs.set_enabled(args.id, False)
+        if not result.get("ok"):
+            print(f"失败：{result.get('error')}", file=sys.stderr)
+            sys.exit(1)
+        print(f"已禁用：{args.id}")
+        return
+
+    if args.action == "remove":
+        result = cronjobs.remove_job(args.id, delete_script=not args.keep_script)
+        if not result.get("ok"):
+            print(f"失败：{result.get('error')}", file=sys.stderr)
+            sys.exit(1)
+        print(f"已删除：{args.id}")
+        return
+
+    if args.action == "export":
+        snippet = cronjobs.export_crontab_snippet(include_disabled=args.include_disabled)
+        if args.output:
+            Path(args.output).write_text(snippet, encoding="utf-8")
+            print(f"已导出：{args.output}")
+        else:
+            print(snippet)
+        return
+
+    if args.action == "export-windows":
+        script = cronjobs.export_windows_scheduler_script(include_disabled=args.include_disabled)
+        if args.output:
+            Path(args.output).write_text(script, encoding="utf-8")
+            print(f"已导出 Windows 任务计划脚本：{args.output}")
+            print("运行方式：以管理员身份打开 PowerShell，然后执行：")
+            print(f"  powershell -ExecutionPolicy Bypass -File \"{args.output}\"")
+        else:
+            print(script)
+        return
+
+    if args.action == "apply":
+        if not args.yes:
+            confirm = input("这会写入系统 crontab（覆盖 AuctusAgent 管理块）。确定继续？(yes/no) ").strip().lower()
+            if confirm != "yes":
+                print("已取消。")
+                return
+        result = cronjobs.apply_to_system_crontab(include_disabled=args.include_disabled)
+        if not result.get("ok"):
+            print(f"失败：{result.get('error')}", file=sys.stderr)
+            sys.exit(1)
+        print("已写入系统 crontab。")
+        return
+
+    if args.action == "apply-windows":
+        result = cronjobs.apply_to_windows_scheduler(include_disabled=args.include_disabled)
+        if not result.get("ok"):
+            print(f"失败：{result.get('error')}", file=sys.stderr)
+            print("提示：以管理员身份运行，或使用 `python agent.py cron export-windows` 生成脚本手动配置。")
+            sys.exit(1)
+        print(f"已创建 {len(result.get('created', []))} 个 Windows 任务计划。")
+        if result.get('errors'):
+            print(f"有 {result.get('skipped', 0)} 个任务创建失败。")
+            for err in result.get('errors', []):
+                print(f"  - {err}")
+        if result.get('note'):
+            print(result['note'])
+        return
+
+    if args.action == "list-windows":
+        tasks = cronjobs.list_windows_scheduler_tasks()
+        if not tasks:
+            print("Windows 任务计划中没有找到 Auctus Agent 任务。")
+            print("提示：用 `python agent.py cron export-windows` 生成任务计划脚本。")
+            return
+        print(f"── Windows 任务计划 ({len(tasks)} 个) ──")
+        for task in tasks:
+            print(f"- [{task['status']}] {task['name']} | 下次运行: {task['next_run']}")
+        return
+
+    print("未知 action", file=sys.stderr)
+    sys.exit(1)
     if result["status"] != "ok":
         sys.exit(1)
 
@@ -422,6 +542,101 @@ def _evolve(args: argparse.Namespace) -> None:
             sys.exit(1)
         print(f"已回滚学习项 {args.id[:8]}…，状态恢复为 pending")
 
+    if args.action == "skill-scan":
+        from app.evolve import skills as skills_mod
+        result = skills_mod.skill_scan(limit_messages=args.messages, limit_logs=args.logs)
+        print(f"技能扫描完成：新增候选 {result['skills_added']} 条")
+        for sid in result.get("ids", []):
+            print(f"- {sid}")
+        if result.get("note"):
+            print(result["note"])
+        return
+
+    if args.action == "skill-list":
+        from app.evolve import skills as skills_mod
+        items = skills_mod.list_skills(status=args.status, limit=args.limit)
+        if not items:
+            print("暂无技能候选。")
+            return
+        for item in items:
+            print(f"[{item['id'][:8]}…] [{item['status']}] {item['name']}")
+            print(f"  confidence={item['confidence']:.2f}")
+            print(f"  {item['level0'][:180]}")
+            print()
+        return
+
+    if args.action == "skill-apply":
+        if not args.id:
+            print("请提供技能 ID：agent.py evolve skill-apply <id>", file=sys.stderr)
+            sys.exit(1)
+        from app.evolve import skills as skills_mod
+        result = skills_mod.apply_skill(args.id)
+        if not result.get("ok"):
+            print(f"失败：{result.get('error')}", file=sys.stderr)
+            sys.exit(1)
+        print(f"已应用技能 {args.id[:8]}…")
+        return
+
+    if args.action == "skill-reject":
+        if not args.id:
+            print("请提供技能 ID：agent.py evolve skill-reject <id>", file=sys.stderr)
+            sys.exit(1)
+        from app.evolve import skills as skills_mod
+        result = skills_mod.reject_skill(args.id)
+        if not result.get("ok"):
+            print(f"失败：{result.get('error')}", file=sys.stderr)
+            sys.exit(1)
+        print(f"已拒绝技能 {args.id[:8]}…")
+        return
+
+    if args.action == "skill-disable":
+        if not args.id:
+            print("请提供技能 ID：agent.py evolve skill-disable <id>", file=sys.stderr)
+            sys.exit(1)
+        from app.evolve import skills as skills_mod
+        result = skills_mod.disable_skill(args.id)
+        if not result.get("ok"):
+            print(f"失败：{result.get('error')}", file=sys.stderr)
+            sys.exit(1)
+        print(f"已停用技能 {args.id[:8]}…")
+        return
+
+    if args.action == "skill-rollback":
+        if not args.id:
+            print("请提供技能 ID：agent.py evolve skill-rollback <id>", file=sys.stderr)
+            sys.exit(1)
+        from app.evolve import skills as skills_mod
+        result = skills_mod.rollback_skill(args.id)
+        if not result.get("ok"):
+            print(f"失败：{result.get('error')}", file=sys.stderr)
+            sys.exit(1)
+        print(f"已回滚技能 {args.id[:8]}…，状态恢复为 pending")
+        return
+
+    if args.action == "eval-build":
+        from app.evolve import eval as eval_mod
+        result = eval_mod.cli_build_eval(name=args.name or "weekly_eval")
+        if not result.get("ok"):
+            print(f"失败：{result.get('error')}", file=sys.stderr)
+            sys.exit(1)
+        print(f"评估集已生成：{result['path']}")
+        print(f"包含 {result['cases']} 个测试用例")
+        return
+
+    if args.action == "eval-run":
+        from app.evolve import eval as eval_mod
+        result = eval_mod.cli_run_eval(name=args.name or "weekly_eval", variant=args.variant or "baseline")
+        if not result.get("ok"):
+            print(f"失败：{result.get('error')}", file=sys.stderr)
+            sys.exit(1)
+        r = result["result"]
+        print(f"评估完成：{r['eval_set']}")
+        print(f"  成功率：{r['success_rate']*100:.1f}% ({r['success_count']}/{r['total_cases']})")
+        print(f"  Token 用量：{r['total_tokens']} (avg {r['avg_tokens']:.0f})")
+        print(f"  风险事件：{r['total_risk_events']}")
+        print(f"  结果保存：{result['result_path']}")
+        return
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="agent", description="Auctus Local Agent CLI")
@@ -483,12 +698,42 @@ def main() -> None:
     relay_p.add_argument("--token", help="Relay token，默认读取 RELAY_SHARED_TOKEN")
 
     evolve_p = sub.add_parser("evolve", help="从历史对话和任务日志中生成、确认自我学习项")
-    evolve_p.add_argument("action", choices=["scan", "list", "apply", "reject", "disable", "rollback"])
+    evolve_p.add_argument("action", choices=[
+        "scan", "list", "apply", "reject", "disable", "rollback",
+        "skill-scan", "skill-list", "skill-apply", "skill-reject", "skill-disable", "skill-rollback",
+        "eval-build", "eval-run",
+    ])
     evolve_p.add_argument("id", nargs="?", help="学习候选 ID（apply/reject/disable/rollback 时必填）")
     evolve_p.add_argument("--messages", type=int, default=120, help="scan 时读取最近 N 条消息")
     evolve_p.add_argument("--logs", type=int, default=80, help="scan 时读取最近 N 条工具日志")
     evolve_p.add_argument("--status", choices=["pending", "applied", "rejected", "disabled", "all"], default="pending")
     evolve_p.add_argument("--limit", type=int, default=50)
+    evolve_p.add_argument("--name", help="eval-build/eval-run 时指定评估集名称")
+    evolve_p.add_argument("--variant", help="eval-run 时指定变体名称（如 baseline, skill_v2）")
+
+    cron_p = sub.add_parser("cron", help="管理本机 cron job（生成脚本 + 导出/写入 crontab）")
+    cron_p.add_argument(
+        "action",
+        choices=["list", "add-backup", "add-run", "enable", "disable", "remove", "export", "apply",
+                 "export-windows", "apply-windows", "list-windows"],
+        help=(
+            "list=列出任务 add-backup=创建备份任务 add-run=定时运行 agent.py run "
+            "enable/disable=启用禁用 remove=删除 export=导出 crontab 片段 apply=写入系统 crontab "
+            "export-windows=导出 Windows 任务计划脚本 apply-windows=写入 Windows 任务计划 list-windows=列出 Windows 任务"
+        ),
+    )
+    cron_p.add_argument("--id", help="任务 ID（enable/disable/remove 时必填）")
+    cron_p.add_argument("--name", default="Auctus Job", help="任务名称（add-* 时可用）")
+    cron_p.add_argument("--cron", default="0 9 * * *", help="cron 表达式（add-* 时可用）")
+    cron_p.add_argument("--desc", default="", help="任务说明（add-* 时可用）")
+    cron_p.add_argument("--source", default="inputs/test", help="备份源目录（add-backup）")
+    cron_p.add_argument("--backups", default="data/backups", help="备份输出目录（add-backup）")
+    cron_p.add_argument("--file", default="test_prd.md", help="agent.py run 的输入文件（add-run，相对于 inputs/）")
+    cron_p.add_argument("--task", default="每周生成一次记账报表（Markdown + Excel）", help="agent.py run 的任务描述（add-run）")
+    cron_p.add_argument("--output", help="export 输出到文件路径（不传则打印到 stdout）")
+    cron_p.add_argument("--include-disabled", action="store_true", help="export/apply 时也包含 disabled 任务（以 # 注释形式）")
+    cron_p.add_argument("--keep-script", action="store_true", help="remove 时保留脚本文件")
+    cron_p.add_argument("-y", "--yes", action="store_true", help="apply 时不再二次确认")
 
     args = parser.parse_args()
     if args.cmd == "run":
@@ -519,6 +764,11 @@ def main() -> None:
         _relay(args)
     elif args.cmd == "evolve":
         _evolve(args)
+    elif args.cmd == "cron":
+        if args.action in {"enable", "disable", "remove"} and not args.id:
+            print("错误：--id 必填", file=sys.stderr)
+            sys.exit(1)
+        _cron(args)
 
 
 if __name__ == "__main__":

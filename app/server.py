@@ -15,12 +15,25 @@ from pydantic import BaseModel
 
 from . import accounting, agent, memory, relay, tools
 from .config import settings
+from .version import API_COMPAT_VERSION, APP_NAME, APP_VERSION, RELEASE_CHANNEL
 
 app = FastAPI(title="Auctus Agent")
 app.include_router(relay.router)
 
 # 输出目录公开下载（仅本地服务，不暴露公网）
 app.mount("/files", StaticFiles(directory=str(settings.output_dir)), name="files")
+
+
+@app.get("/api/version")
+def version_info():
+    """Return local app version and update metadata."""
+    return {
+        "name": APP_NAME,
+        "version": APP_VERSION,
+        "channel": RELEASE_CHANNEL,
+        "api_compat": API_COMPAT_VERSION,
+        "update_check_url": settings.update_check_url,
+    }
 
 
 WEB_UI = (Path(__file__).parent / "ui.html").read_text(encoding="utf-8") if (Path(__file__).parent / "ui.html").exists() else """
@@ -1425,6 +1438,8 @@ class ChatIn(BaseModel):
     session_id: Optional[str] = None
     message: str
     terminal_permission: Optional[str] = None
+    calendar_permission: Optional[str] = None
+    file_permission: Optional[str] = None
 
 
 class ChatOut(BaseModel):
@@ -1464,6 +1479,10 @@ class TerminalAccessIn(BaseModel):
     access: str
 
 
+class CalendarAccessIn(BaseModel):
+    access: str
+
+
 class ApiKeyIn(BaseModel):
     provider: str
     api_key: str
@@ -1473,6 +1492,19 @@ class ApiKeyValidationIn(BaseModel):
     provider: str
     api_key: str
     model: str
+
+
+class EmailAccountIn(BaseModel):
+    email_address: str
+    username: str = ""
+    password: str
+    imap_host: str
+    imap_port: int = 993
+    imap_ssl: bool = True
+    smtp_host: str = ""
+    smtp_port: int = 465
+    smtp_ssl: bool = True
+    label: str = ""
 
 
 class WorkspaceIn(BaseModel):
@@ -1486,6 +1518,7 @@ class OnboardingIn(BaseModel):
     api_key: Optional[str] = None
     hosted_email: Optional[str] = None
     hosted_region: Optional[str] = None
+    hosted_base_url: Optional[str] = None
     agent_name: Optional[str] = None
     persona: Optional[str] = None
     system_language: Optional[str] = None
@@ -1493,6 +1526,7 @@ class OnboardingIn(BaseModel):
     workspace_path: Optional[str] = None
     permission_scope: Optional[str] = None
     terminal_access: Optional[str] = None
+    calendar_access: Optional[str] = None
     save_profile: bool = False
 
 
@@ -1555,8 +1589,10 @@ def onboarding_state() -> dict:
         "persona": state.get("persona", "professional"),
         "system_language": state.get("system_language", "zh"),
         "hosted_region": _normalize_hosted_region(state.get("hosted_region")),
+        "hosted_base_url": state.get("hosted_base_url", "http://localhost:8001"),
         "permission_scope": _normalize_permission_scope(state.get("permission_scope")),
         "terminal_access": _normalize_terminal_access(state.get("terminal_access")),
+        "calendar_access": _normalize_calendar_access(state.get("calendar_access")),
         "hosted_account": accounting.hosted_account_summary(state),
         "route": accounting.current_route(),
         "model": settings.model,
@@ -1583,13 +1619,36 @@ def save_onboarding(body: OnboardingIn) -> dict:
         if not body.hosted_email:
             raise HTTPException(400, "hosted_email is required")
         region = _normalize_hosted_region(body.hosted_region)
-        hosted_account = accounting.save_hosted_account(body.hosted_email, region=region)
-        accounting.set_route(_hosted_api_route())
+        base_url = (body.hosted_base_url or "http://localhost:8001").rstrip("/")
+        
+        # If api_key provided (new flow with login), save it and use proxy route
+        if body.api_key:
+            hosted_account = accounting.save_hosted_account(
+                body.hosted_email,
+                region=region,
+                api_key=body.api_key,
+                base_url=base_url
+            )
+            accounting.set_api_key("auctus_hosted", body.api_key, base_url=base_url)
+            accounting.set_route("proxy")
+        else:
+            # Backward compatibility: old flow without api_key
+            hosted_account = accounting.save_hosted_account(
+                body.hosted_email,
+                region=region,
+                base_url=base_url
+            )
+            # Use proxy if configured, otherwise local preview
+            if settings.proxy_base_url:
+                accounting.set_route("proxy")
+            else:
+                accounting.set_route("local")
     else:
         accounting.set_route("local")
 
     workspace_dir = _set_workspace_path(body.workspace_path) if body.workspace_path else settings.workspace_dir.resolve()
     candidate_ids = _store_onboarding_memory_candidates(body)
+    current_state = accounting.get_setup_state()
     state = accounting.set_setup_state(
         {
             "onboarding_completed": "1",
@@ -1598,8 +1657,12 @@ def save_onboarding(body: OnboardingIn) -> dict:
             "persona": _normalize_persona(body.persona),
             "system_language": _normalize_language(body.system_language),
             "hosted_region": _normalize_hosted_region(body.hosted_region),
+            "hosted_base_url": (body.hosted_base_url or "http://localhost:8001").rstrip("/"),
             "permission_scope": _normalize_permission_scope(body.permission_scope),
             "terminal_access": _normalize_terminal_access(body.terminal_access),
+            "calendar_access": _normalize_calendar_access(body.calendar_access)
+            if body.calendar_access is not None
+            else _normalize_calendar_access(current_state.get("calendar_access")),
             "model": settings.model,
             "workspace_dir": str(workspace_dir),
         }
@@ -1614,6 +1677,7 @@ def save_onboarding(body: OnboardingIn) -> dict:
         "hosted_region": _normalize_hosted_region(body.hosted_region),
         "permission_scope": _normalize_permission_scope(body.permission_scope),
         "terminal_access": _normalize_terminal_access(body.terminal_access),
+        "calendar_access": _normalize_calendar_access(state.get("calendar_access")),
         "workspace": str(workspace_dir),
         "hosted_account": hosted_account,
         "candidate_memory_ids": candidate_ids,
@@ -1626,7 +1690,29 @@ def chat(body: ChatIn) -> ChatOut:
     if not body.message.strip():
         raise HTTPException(400, "empty message")
     sid = body.session_id or f"web-{uuid.uuid4().hex[:8]}"
+    file_permission = _normalize_file_permission(body.file_permission)
+    calendar_permission = _normalize_calendar_permission(body.calendar_permission)
     terminal_permission = _normalize_terminal_permission(body.terminal_permission)
+    if _should_request_file_permission(body.message, file_permission):
+        return ChatOut(
+            session_id=sid,
+            reply="",
+            permission_request={
+                "type": "files",
+                "message": "这个任务需要访问你电脑上的文件（可能超出当前授权 workspace）。是否临时授权本次访问？",
+                "options": ["once", "always", "no"],
+            },
+        )
+    if _should_request_calendar_permission(body.message, calendar_permission):
+        return ChatOut(
+            session_id=sid,
+            reply="",
+            permission_request={
+                "type": "calendar",
+                "message": "这个任务需要访问系统日历/提醒事项。是否授权？（如果你不希望我直接写入日历，我也可以生成 .ics 文件供你导入）",
+                "options": ["once", "always", "no"],
+            },
+        )
     if _should_request_terminal_permission(body.message, terminal_permission):
         return ChatOut(
             session_id=sid,
@@ -1637,16 +1723,67 @@ def chat(body: ChatIn) -> ChatOut:
                 "options": ["once", "always", "no"],
             },
         )
+    if calendar_permission == "no":
+        return ChatOut(
+            session_id=sid,
+            reply="好的，这次我不访问系统日历/提醒事项。如果你愿意，我可以帮你生成一个 .ics 文件，你导入到日历即可。",
+        )
     if terminal_permission == "no":
         return ChatOut(session_id=sid, reply="好的，这次不执行终端命令。")
+    if file_permission == "no":
+        return ChatOut(
+            session_id=sid,
+            reply=(
+                "好的，这次我不访问 workspace 之外的文件。\n"
+                "你可以：\n"
+                "- 把目标文件复制/移动到当前 workspace 后再让我处理；或\n"
+                "- 在设置里把“文件权限范围”改为“整台电脑”，再重试。"
+            ),
+        )
     try:
+        message = body.message
+        file_scope_override = None
+        if file_permission in {"once", "always"}:
+            if file_permission == "always":
+                accounting.set_setup_state({"permission_scope": "full_computer"})
+            else:
+                file_scope_override = "full_computer"
+            message = (
+                f"【已授权：文件访问={file_permission}】\n"
+                "如果需要访问 workspace 外的文件，现在可以读取/写入支持的文本文件；高风险操作仍需终端权限。\n\n"
+                + message
+            )
+        if calendar_permission in {"once", "always"}:
+            if calendar_permission == "always":
+                accounting.set_setup_state({"calendar_access": "enabled"})
+            # 给 LLM 明确“已授权”的信号，并提供当前可落地的降级方案（生成 .ics）
+            message = (
+                f"【已授权：日历访问={calendar_permission}】\n"
+                "如果你无法直接写入系统日历，请生成可导入的 .ics 文件（周五早上“加油”提醒），并告诉用户如何导入。\n\n"
+                + message
+            )
         if terminal_permission in {"once", "always"}:
             if terminal_permission == "always":
                 accounting.set_setup_state({"terminal_access": "enabled"})
+            # 给 LLM 明确“已授权”的信号，减少“需要你在当前消息明确授权”的二次卡顿
+            message = (
+                f"【已授权：终端命令={terminal_permission}】\n"
+                "你可以调用 run_terminal_command 执行命令；参数里务必包含 confirmed:true。\n"
+                "删除类操作默认必须“移到废纸篓/回收站（可恢复）”，不要直接 rm；只有用户明确要求“永久/彻底删除”时才允许 rm。\n\n"
+                + message
+            )
             with tools.terminal_access_override("enabled"):
-                result = agent.chat(sid, body.message)
+                if file_scope_override:
+                    with tools.permission_scope_override(file_scope_override):
+                        result = agent.chat(sid, message)
+                else:
+                    result = agent.chat(sid, message)
         else:
-            result = agent.chat(sid, body.message)
+            if file_scope_override:
+                with tools.permission_scope_override(file_scope_override):
+                    result = agent.chat(sid, message)
+            else:
+                result = agent.chat(sid, message)
     except Exception as e:
         raise HTTPException(503, _friendly_runtime_error(str(e)))
     files = [_file_url(p) for p in result.get("files", [])]
@@ -1816,6 +1953,29 @@ def set_terminal_access(body: TerminalAccessIn) -> dict:
     }
 
 
+@app.get("/api/calendar-access")
+def get_calendar_access() -> dict:
+    state = accounting.get_setup_state()
+    access = _normalize_calendar_access(state.get("calendar_access"))
+    return {
+        "access": access,
+        "label": _calendar_access_label(access),
+        "available": _available_calendar_access(),
+    }
+
+
+@app.post("/api/calendar-access")
+def set_calendar_access(body: CalendarAccessIn) -> dict:
+    access = _normalize_calendar_access(body.access)
+    state = accounting.set_setup_state({"calendar_access": access})
+    return {
+        "access": access,
+        "label": _calendar_access_label(access),
+        "available": _available_calendar_access(),
+        "state": state,
+    }
+
+
 @app.get("/api/route")
 def get_route() -> dict:
     state = accounting.get_setup_state()
@@ -1882,6 +2042,156 @@ def api_keys() -> dict:
 @app.delete("/api/api-keys/{provider}")
 def delete_api_key(provider: str) -> dict:
     return accounting.delete_api_key(provider)
+
+
+@app.get("/api/email-accounts")
+def list_email_accounts_endpoint() -> dict:
+    return {"items": accounting.list_email_accounts(), "providers": accounting.EMAIL_PROVIDERS}
+
+
+@app.post("/api/email-accounts")
+def add_email_account(body: EmailAccountIn) -> dict:
+    email_address = body.email_address.strip()
+    if not email_address or "@" not in email_address:
+        raise HTTPException(400, "invalid email address")
+    if not body.password.strip():
+        raise HTTPException(400, "password is required")
+    if not body.imap_host.strip():
+        raise HTTPException(400, "imap_host is required")
+    try:
+        item = accounting.save_email_account(
+            email_address=email_address,
+            username=body.username.strip() or email_address,
+            password=body.password.strip(),
+            imap_host=body.imap_host.strip(),
+            imap_port=body.imap_port,
+            imap_ssl=body.imap_ssl,
+            smtp_host=body.smtp_host.strip(),
+            smtp_port=body.smtp_port,
+            smtp_ssl=body.smtp_ssl,
+            label=body.label.strip(),
+        )
+    except Exception as e:
+        raise HTTPException(400, str(e))
+    return item
+
+
+@app.delete("/api/email-accounts/{account_id}")
+def remove_email_account(account_id: str) -> dict:
+    return accounting.delete_email_account(account_id)
+
+
+@app.post("/api/email-accounts/{account_id}/test")
+def test_email_account(account_id: str) -> dict:
+    from .email_client import test_connection
+    account = accounting.get_email_account(account_id)
+    if not account:
+        raise HTTPException(404, "email account not found")
+    return test_connection(account)
+
+
+# ── Telegram config ──────────────────────────────────────────────────────────
+
+class TelegramConfigIn(BaseModel):
+    bot_token: str
+    allowed_user_ids: str = ""
+
+
+def _tg_api(token: str, method: str, params: Optional[dict] = None) -> dict:
+    import urllib.request
+    url = f"https://api.telegram.org/bot{token}/{method}"
+    if params:
+        import urllib.parse
+        url += "?" + urllib.parse.urlencode(params)
+    try:
+        with urllib.request.urlopen(url, timeout=8) as resp:
+            return json.loads(resp.read())
+    except Exception as e:
+        return {"ok": False, "description": str(e)}
+
+
+@app.get("/api/telegram/config")
+def get_telegram_config() -> dict:
+    token = settings.telegram_bot_token or ""
+    ids = settings.telegram_allowed_user_ids
+    masked = f"...{token[-6:]}" if len(token) > 6 else ("(未配置)" if not token else token)
+    return {
+        "configured": bool(token),
+        "token_hint": masked,
+        "allowed_user_ids": ids,
+    }
+
+
+@app.post("/api/telegram/verify-token")
+def verify_telegram_token(body: TelegramConfigIn) -> dict:
+    token = body.bot_token.strip()
+    if not token:
+        raise HTTPException(400, "bot_token is required")
+    result = _tg_api(token, "getMe")
+    if not result.get("ok"):
+        return {"ok": False, "error": result.get("description", "Token 无效")}
+    bot = result.get("result", {})
+    return {"ok": True, "username": bot.get("username", ""), "name": bot.get("first_name", "")}
+
+
+@app.post("/api/telegram/fetch-updates")
+def fetch_telegram_updates(body: TelegramConfigIn) -> dict:
+    """Return the most recent sender user IDs from getUpdates (for first-time ID lookup)."""
+    token = body.bot_token.strip()
+    if not token:
+        raise HTTPException(400, "bot_token is required")
+    result = _tg_api(token, "getUpdates", {"limit": 10, "timeout": 0})
+    if not result.get("ok"):
+        return {"ok": False, "error": result.get("description", "获取失败"), "user_ids": []}
+    updates = result.get("result", [])
+    seen: dict[int, str] = {}
+    for upd in updates:
+        msg = upd.get("message") or upd.get("callback_query", {}).get("message")
+        sender = (upd.get("message") or {}).get("from") or {}
+        uid = sender.get("id")
+        if uid and uid not in seen:
+            name = " ".join(filter(None, [sender.get("first_name"), sender.get("last_name")])) or str(uid)
+            seen[uid] = name
+    return {"ok": True, "user_ids": [{"id": k, "name": v} for k, v in seen.items()]}
+
+
+@app.post("/api/telegram/save")
+def save_telegram_config(body: TelegramConfigIn) -> dict:
+    token = body.bot_token.strip()
+    ids = body.allowed_user_ids.strip()
+    if not token:
+        raise HTTPException(400, "bot_token is required")
+    verify = _tg_api(token, "getMe")
+    if not verify.get("ok"):
+        raise HTTPException(400, verify.get("description", "Token 验证失败"))
+    env_path = Path(".env")
+    try:
+        from dotenv import set_key as _set_key
+        env_path.touch()
+        _set_key(str(env_path), "TELEGRAM_BOT_TOKEN", token)
+        _set_key(str(env_path), "TELEGRAM_ALLOWED_USER_IDS", ids)
+    except Exception as e:
+        raise HTTPException(500, f"写入 .env 失败：{e}")
+    settings.telegram_bot_token = token
+    settings.telegram_allowed_user_ids = ids
+    bot = verify.get("result", {})
+    return {"ok": True, "username": bot.get("username", ""), "name": bot.get("first_name", "")}
+
+
+@app.post("/api/telegram/test-message")
+def send_telegram_test(body: TelegramConfigIn) -> dict:
+    token = body.bot_token.strip() or (settings.telegram_bot_token or "")
+    ids_str = body.allowed_user_ids.strip() or settings.telegram_allowed_user_ids
+    if not token:
+        raise HTTPException(400, "未配置 bot_token")
+    user_ids = [x.strip() for x in ids_str.split(",") if x.strip()]
+    if not user_ids:
+        raise HTTPException(400, "请先填写允许的 Telegram 用户 ID")
+    results = []
+    for uid in user_ids[:3]:
+        r = _tg_api(token, "sendMessage", {"chat_id": uid, "text": "✅ Auctus Agent 已成功连接 Telegram！"})
+        results.append({"user_id": uid, "ok": r.get("ok"), "error": r.get("description", "")})
+    return {"ok": all(r["ok"] for r in results), "results": results}
 
 
 @app.get("/api/workspace")
@@ -2066,11 +2376,27 @@ def _normalize_permission_scope(scope: Optional[str]) -> str:
 
 
 def _normalize_terminal_access(access: Optional[str]) -> str:
+    # 默认关闭终端命令权限（用户需在设置里开启）
+    value = (access or "disabled").strip().lower()
+    return value if value in {"disabled", "enabled"} else "disabled"
+
+
+def _normalize_calendar_access(access: Optional[str]) -> str:
     value = (access or "disabled").strip().lower()
     return value if value in {"disabled", "enabled"} else "disabled"
 
 
 def _normalize_terminal_permission(permission: Optional[str]) -> str:
+    value = (permission or "").strip().lower()
+    return value if value in {"once", "always", "no"} else ""
+
+
+def _normalize_calendar_permission(permission: Optional[str]) -> str:
+    value = (permission or "").strip().lower()
+    return value if value in {"once", "always", "no"} else ""
+
+
+def _normalize_file_permission(permission: Optional[str]) -> str:
     value = (permission or "").strip().lower()
     return value if value in {"once", "always", "no"} else ""
 
@@ -2086,6 +2412,13 @@ def _available_terminal_access() -> list[dict[str, str]]:
     return [
         {"access": "disabled", "label": "关闭终端命令"},
         {"access": "enabled", "label": "允许终端命令"},
+    ]
+
+
+def _available_calendar_access() -> list[dict[str, str]]:
+    return [
+        {"access": "disabled", "label": "不允许访问日历"},
+        {"access": "enabled", "label": "允许访问日历"},
     ]
 
 
@@ -2105,6 +2438,14 @@ def _terminal_access_label(access: Optional[str]) -> str:
     return labels.get(_normalize_terminal_access(access), labels["disabled"])
 
 
+def _calendar_access_label(access: Optional[str]) -> str:
+    labels = {
+        "disabled": "不允许访问日历",
+        "enabled": "允许访问日历",
+    }
+    return labels.get(_normalize_calendar_access(access), labels["disabled"])
+
+
 _TERMINAL_INTENT_KEYWORDS = (
     "终端",
     "命令",
@@ -2119,6 +2460,15 @@ _TERMINAL_INTENT_KEYWORDS = (
     "跑测试",
     "打开网页",
     "打开html",
+    # 文件/系统操作（例如删除文件）也需要弹权限
+    "删除",
+    "删掉",
+    "移到废纸篓",
+    "废纸篓",
+    "回收站",
+    "trash",
+    "rm ",
+    "mv ",
 )
 _COMMAND_LIKE_RE = re.compile(
     r"(^|\s)(open|npm|pnpm|yarn|pip|pytest|python3?|node|git|ls|pwd|cat|mkdir|touch|curl|brew|uvicorn|docker)\b",
@@ -2136,6 +2486,61 @@ def _should_request_terminal_permission(message: str, terminal_permission: str) 
     if not text:
         return False
     return any(keyword in text for keyword in _TERMINAL_INTENT_KEYWORDS) or bool(_COMMAND_LIKE_RE.search(text))
+
+
+_CALENDAR_INTENT_KEYWORDS = (
+    "日历",
+    "行程",
+    "提醒",
+    "提醒事项",
+    "calendar",
+    "reminder",
+    "提醒我",
+)
+
+
+def _should_request_calendar_permission(message: str, calendar_permission: str) -> bool:
+    if calendar_permission in {"once", "always", "no"}:
+        return False
+    state = accounting.get_setup_state()
+    if _normalize_calendar_access(state.get("calendar_access")) == "enabled":
+        return False
+    text = message.strip().lower()
+    if not text:
+        return False
+    return any(keyword in text for keyword in _CALENDAR_INTENT_KEYWORDS)
+
+
+_FILE_INTENT_KEYWORDS = (
+    "桌面",
+    "desktop",
+    "下载",
+    "downloads",
+    "文档",
+    "documents",
+    "图片",
+    "pictures",
+    "音乐",
+    "music",
+    "视频",
+    "movies",
+    "/users/",
+    "c:\\",
+    "d:\\",
+)
+
+
+def _should_request_file_permission(message: str, file_permission: str) -> bool:
+    if file_permission in {"once", "always", "no"}:
+        return False
+    state = accounting.get_setup_state()
+    if _normalize_permission_scope(state.get("permission_scope")) == "full_computer":
+        return False
+    text = message.strip().lower()
+    if not text:
+        return False
+    # 只要用户明显在谈“系统路径/常见目录”，就先问一次权限，让用户选择
+    return any(keyword in text for keyword in _FILE_INTENT_KEYWORDS)
 
 
 _PERSONA_LABELS = {

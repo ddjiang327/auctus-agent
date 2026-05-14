@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     # Agent 行为
     max_tool_iterations: int = 8
     context_token_budget: int = 8000  # 超过就触发滚动摘要
+    update_check_url: Optional[str] = None
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

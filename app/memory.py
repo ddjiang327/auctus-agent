@@ -140,7 +140,8 @@ def load_history(session_id: str, limit: int = 40) -> list[dict]:
         rows.reverse()
         out: list[dict] = []
         for r in rows:
-            m: dict = {"role": r.role, "content": r.content}
+            # _msg_id 是内部字段，用于滚动摘要 covers_until_msg_id 计算；不会发给模型
+            m: dict = {"role": r.role, "content": r.content, "_msg_id": r.id}
             if r.tool_calls:
                 m["tool_calls"] = json.loads(r.tool_calls)
             if r.tool_call_id:
@@ -161,6 +162,21 @@ def latest_summary(session_id: str) -> Optional[str]:
         )
         row = s.scalars(stmt).first()
         return row.content if row else None
+
+
+def latest_summary_meta(session_id: str) -> Optional[dict]:
+    """返回最近一条滚动摘要及其覆盖范围。"""
+    with db_session() as s:
+        stmt = (
+            select(Summary)
+            .where(Summary.session_id == session_id)
+            .order_by(Summary.id.desc())
+            .limit(1)
+        )
+        row = s.scalars(stmt).first()
+        if row is None:
+            return None
+        return {"content": row.content, "covers_until_msg_id": int(row.covers_until_msg_id or 0)}
 
 
 def write_summary(session_id: str, content: str, covers_until_msg_id: int) -> None:
@@ -366,11 +382,10 @@ def recall(query: str, top_k: int = 5) -> list[dict]:
 
 # ---------- 滚动摘要 ----------
 
-SUMMARIZE_PROMPT = """你是一个对话压缩助手。请把下面这段对话压成简明要点（200 字内），
+SUMMARIZE_PROMPT = """你是一个对话压缩助手。请把对话压成简明要点（200 字内），
 保留：用户偏好、未完成的任务、关键事实、人物/项目名。忽略寒暄。
 
-要压缩的对话：
-{conv}
+{context}
 
 输出格式：
 - 用 markdown bullet
@@ -378,28 +393,103 @@ SUMMARIZE_PROMPT = """你是一个对话压缩助手。请把下面这段对话�
 """
 
 
-def summarize_and_truncate(session_id: str, all_messages: list[dict], keep_recent: int = 12) -> list[dict]:
-    """如果消息太多，把前半段压成摘要，保留最近 N 条。
+def _estimate_tokens(messages: list[dict]) -> int:
+    """Very rough token estimator.
+
+    目标：只用于“是否需要滚动摘要”的阈值判断，不追求精确。
+    经验上英文 ~4 chars/token，中文更接近 ~1.5-2 chars/token。
+    这里采用折中：按 UTF-8 字符数估算，并给 tool / role 增加少量开销。
+    """
+    total_chars = 0
+    tool_calls = 0
+    for m in messages:
+        content = m.get("content") or ""
+        if isinstance(content, str):
+            total_chars += len(content)
+        if m.get("tool_calls"):
+            tool_calls += 1
+    # 2 chars/token 比较保守（偏“多算”），避免上下文溢出
+    base = int(total_chars / 2)
+    overhead = len(messages) * 8 + tool_calls * 60
+    return base + overhead
+
+
+def summarize_and_truncate(
+    session_id: str,
+    all_messages: list[dict],
+    keep_recent: int = 12,
+    token_budget: int = 8000,
+) -> list[dict]:
+    """如果消息太多或 token 预算超标，把前半段压成摘要，保留最近 N 条。
 
     返回新的 messages 列表（带 system 摘要前缀）。
     """
-    if len(all_messages) <= keep_recent + 2:
-        return all_messages
+    summary_meta = latest_summary_meta(session_id)
+    existing_summary = (summary_meta or {}).get("content") if summary_meta else ""
+    covers_until = int((summary_meta or {}).get("covers_until_msg_id") or 0)
 
-    to_compress = all_messages[: -keep_recent]
-    conv_text = "\n".join(
+    # 去掉内部字段，避免传入模型
+    def _strip(msgs: list[dict]) -> list[dict]:
+        cleaned = []
+        for m in msgs:
+            if "_msg_id" in m:
+                mm = dict(m)
+                mm.pop("_msg_id", None)
+                cleaned.append(mm)
+            else:
+                cleaned.append(m)
+        return cleaned
+
+    # 如果当前窗口里最早的消息 id 已经大于 covers_until，说明更早内容只在摘要里；
+    # 即使本轮不触发压缩，也应把摘要前置注入，保证上下文完整。
+    min_msg_id = None
+    for m in all_messages:
+        mid = m.get("_msg_id")
+        if isinstance(mid, int):
+            min_msg_id = mid if min_msg_id is None else min(min_msg_id, mid)
+
+    needs_compact = not (len(all_messages) <= keep_recent + 2 and _estimate_tokens(all_messages) <= token_budget)
+
+    # 不需要压缩：仅在“摘要能补齐更早上下文”时注入摘要
+    if not needs_compact:
+        if existing_summary and min_msg_id is not None and covers_until and covers_until < min_msg_id:
+            return [{"role": "system", "content": f"[历史会话摘要]\n{existing_summary}"}, *_strip(all_messages)]
+        return _strip(all_messages)
+
+    # 只压缩“尚未被 covers_until 覆盖”的新增部分，避免重复压同一段
+    unsummarized = [m for m in all_messages if isinstance(m.get("_msg_id"), int) and m["_msg_id"] > covers_until]
+    if len(unsummarized) <= keep_recent:
+        # 消息条数不够切分，只能缩减保留条数来满足 token 预算
+        kept = list(unsummarized)
+        while _estimate_tokens(kept) > token_budget and len(kept) > 4:
+            kept.pop(0)
+        out = _strip(kept)
+        if existing_summary:
+            return [{"role": "system", "content": f"[历史会话摘要]\n{existing_summary}"}, *out]
+        return out
+
+    to_keep = unsummarized[-keep_recent:]
+    to_compress = unsummarized[:-keep_recent]
+    # 压缩到这里为止（分段累计）
+    new_covers_until = int(to_compress[-1].get("_msg_id") or covers_until)
+
+    new_conv = "\n".join(
         f"{m['role']}: {m.get('content','')[:400]}" for m in to_compress if m.get("content")
     )
+    if existing_summary:
+        context = f"已有摘要（覆盖到消息 {covers_until}）：\n{existing_summary}\n\n新增对话（请合并进摘要）：\n{new_conv}"
+    else:
+        context = f"要压缩的对话：\n{new_conv}"
     resp = llm.chat_completion(
-        messages=[{"role": "user", "content": SUMMARIZE_PROMPT.format(conv=conv_text)}],
+        messages=[{"role": "user", "content": SUMMARIZE_PROMPT.format(context=context)}],
         temperature=0.2,
     )
     summary_text = resp["choices"][0]["message"]["content"]
-    write_summary(session_id, summary_text, covers_until_msg_id=0)
+    write_summary(session_id, summary_text, covers_until_msg_id=new_covers_until)
 
     return [
         {"role": "system", "content": f"[历史会话摘要]\n{summary_text}"},
-        *all_messages[-keep_recent:],
+        *_strip(to_keep),
     ]
 
 

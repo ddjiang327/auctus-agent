@@ -268,19 +268,30 @@ def build_runtime_context(user_text: str, path: Optional[Path] = None, limit: in
         limit=limit,
     )
     workflows = _match_workflows(user_text, path=path, limit=3)
-    if not rules and not workflows:
+    skill_ctx = ""
+    try:
+        from .evolve.skills import build_skill_context
+        skill_ctx = build_skill_context(user_text, path=path)
+    except Exception:
+        pass
+    if not rules and not workflows and not skill_ctx:
         return ""
 
-    lines = ["[自我学习规则]", "这些规则来自用户确认过的历史学习项；与当前用户要求冲突时，以当前用户要求为准。"]
-    if rules:
-        lines.append("通用规则：")
-        for item in rules:
-            lines.append(f"- {item['title']}：{item['content']}")
-    if workflows:
-        lines.append("可能适用的工作流：")
-        for item in workflows:
-            lines.append(f"- {item['title']}：{item['content']}")
-    return "\n".join(lines)
+    parts: list[str] = []
+    if rules or workflows:
+        lines = ["[自我学习规则]", "这些规则来自用户确认过的历史学习项；与当前用户要求冲突时，以当前用户要求为准。"]
+        if rules:
+            lines.append("通用规则：")
+            for item in rules:
+                lines.append(f"- {item['title']}：{item['content']}")
+        if workflows:
+            lines.append("可能适用的工作流：")
+            for item in workflows:
+                lines.append(f"- {item['title']}：{item['content']}")
+        parts.append("\n".join(lines))
+    if skill_ctx:
+        parts.append(skill_ctx)
+    return "\n\n".join(parts)
 
 
 def build_tool_retry_hint(

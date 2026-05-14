@@ -26,7 +26,12 @@ def _system_prompt() -> str:
 def _build_messages(session_id: str, user_text: str) -> list[dict]:
     """组装一次完整调用所需的 messages：system + 摘要 + 历史 + 当前。"""
     history = memory.load_history(session_id, limit=40)
-    history = memory.summarize_and_truncate(session_id, history, keep_recent=12)
+    history = memory.summarize_and_truncate(
+        session_id,
+        history,
+        keep_recent=12,
+        token_budget=settings.context_token_budget,
+    )
     history = _sanitize_tool_history(history)
 
     msgs: list[dict] = [{"role": "system", "content": _system_prompt()}]
@@ -36,9 +41,7 @@ def _build_messages(session_id: str, user_text: str) -> list[dict]:
     memory_context = _memory_context(user_text)
     if memory_context:
         msgs.append({"role": "system", "content": memory_context})
-    summary = memory.latest_summary(session_id)
-    if summary:
-        msgs.append({"role": "system", "content": f"[长期记忆摘要]\n{summary}"})
+    # 历史会话摘要由 memory.summarize_and_truncate 负责插入（按 msg_id 分段累计，且避免重复压缩）
     evolution_context = evolution.build_runtime_context(user_text)
     if evolution_context:
         msgs.append({"role": "system", "content": evolution_context})
@@ -191,7 +194,7 @@ def _workspace_context() -> str:
     workspace = settings.workspace_dir.resolve()
     state = accounting.get_setup_state()
     scope = state.get("permission_scope", "workspace")
-    terminal_access = state.get("terminal_access", "disabled")
+    terminal_access = state.get("terminal_access", "enabled")
     if scope == "full_computer":
         scope_text = (
             "- 当前文件权限模式：整机文件权限。read_file/write_file 可以访问电脑上的任意路径；"

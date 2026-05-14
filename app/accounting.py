@@ -24,7 +24,7 @@ from .config import settings
 
 LOCAL_USER_ID = "local"
 ROUTES = {"local", "byo", "proxy"}
-PROVIDERS = {"anthropic", "openai", "deepseek", "dashscope"}
+PROVIDERS = {"anthropic", "openai", "deepseek", "dashscope", "auctus_hosted"}
 
 _usage_context: contextvars.ContextVar[dict[str, str]] = contextvars.ContextVar(
     "usage_context",
@@ -67,6 +67,35 @@ def init_db(path: Optional[Path] = None) -> None:
                 encrypted_key TEXT,
                 key_hint TEXT,
                 active INTEGER NOT NULL DEFAULT 1,
+                metadata TEXT,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            )
+            """
+        )
+        # Migration: add metadata column if not exists
+        try:
+            conn.execute("SELECT metadata FROM api_keys LIMIT 1")
+        except sqlite3.OperationalError:
+            conn.execute("ALTER TABLE api_keys ADD COLUMN metadata TEXT")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS email_accounts (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                label TEXT,
+                email_address TEXT NOT NULL,
+                username TEXT NOT NULL,
+                imap_host TEXT NOT NULL,
+                imap_port INTEGER NOT NULL DEFAULT 993,
+                imap_ssl INTEGER NOT NULL DEFAULT 1,
+                smtp_host TEXT NOT NULL,
+                smtp_port INTEGER NOT NULL DEFAULT 465,
+                smtp_ssl INTEGER NOT NULL DEFAULT 1,
+                encrypted_password TEXT NOT NULL,
+                password_hint TEXT,
+                active INTEGER NOT NULL DEFAULT 1,
                 created_at REAL NOT NULL,
                 updated_at REAL NOT NULL,
                 FOREIGN KEY(user_id) REFERENCES users(id)
@@ -102,6 +131,7 @@ def init_db(path: Optional[Path] = None) -> None:
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_user_created ON usage(user_id, created_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_session ON usage(session_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_email_user_active ON email_accounts(user_id, active, updated_at)")
         conn.commit()
 
 
@@ -169,7 +199,7 @@ def setup_completed(path: Optional[Path] = None) -> bool:
     return get_setup_state(path=path).get("onboarding_completed") == "1"
 
 
-def save_hosted_account(email: str, region: str = "auto", path: Optional[Path] = None) -> dict:
+def save_hosted_account(email: str, region: str = "auto", api_key: Optional[str] = None, base_url: Optional[str] = None, path: Optional[Path] = None) -> dict:
     email = email.strip().lower()
     if "@" not in email or len(email) > 180:
         raise ValueError("invalid login email")
@@ -180,6 +210,8 @@ def save_hosted_account(email: str, region: str = "auto", path: Optional[Path] =
         {
             "hosted_email": email,
             "hosted_region": region,
+            "hosted_api_key": api_key or "",
+            "hosted_base_url": (base_url or "http://localhost:8001").rstrip("/"),
             "hosted_balance_cents": get_setup_state(path=path).get("hosted_balance_cents", "0"),
             "hosted_free_tokens": get_setup_state(path=path).get("hosted_free_tokens", "50000"),
         },
@@ -195,6 +227,7 @@ def hosted_account_summary(state: Optional[dict[str, str]] = None, path: Optiona
         "logged_in": bool(email),
         "email": email,
         "region": data.get("hosted_region", "auto"),
+        "base_url": data.get("hosted_base_url", "http://localhost:8001"),
         "balance_cents": _as_int(data.get("hosted_balance_cents")),
         "free_tokens": _as_int(data.get("hosted_free_tokens")),
         "recharge_url": "/billing",
@@ -214,10 +247,10 @@ def provider_for_model(model: str) -> Optional[str]:
     return None
 
 
-def set_api_key(provider: str, api_key: str, user_id: str = LOCAL_USER_ID, path: Optional[Path] = None) -> dict:
+def set_api_key(provider: str, api_key: str, user_id: str = LOCAL_USER_ID, base_url: Optional[str] = None, path: Optional[Path] = None) -> dict:
     provider = provider.strip().lower()
     api_key = api_key.strip()
-    if provider not in PROVIDERS:
+    if provider not in PROVIDERS and provider != "auctus_hosted":
         raise ValueError(f"unsupported provider: {provider}")
     if not api_key:
         raise ValueError("empty api key")
@@ -226,6 +259,9 @@ def set_api_key(provider: str, api_key: str, user_id: str = LOCAL_USER_ID, path:
     key_id = str(uuid.uuid4())
     encrypted = _encrypt_secret(api_key)
     hint = _key_hint(api_key)
+    # For auctus_hosted, use proxy route and store base_url in metadata
+    route = 'proxy' if provider == 'auctus_hosted' else 'byo'
+    metadata = json.dumps({"base_url": base_url}) if base_url and provider == 'auctus_hosted' else None
     with sqlite3.connect(path or db_path()) as conn:
         conn.execute(
             "UPDATE api_keys SET active = 0, updated_at = ? WHERE user_id = ? AND provider = ? AND active = 1",
@@ -234,11 +270,11 @@ def set_api_key(provider: str, api_key: str, user_id: str = LOCAL_USER_ID, path:
         conn.execute(
             """
             INSERT INTO api_keys (
-                id, user_id, provider, route, encrypted_key, key_hint, active, created_at, updated_at
+                id, user_id, provider, route, encrypted_key, key_hint, active, metadata, created_at, updated_at
             )
-            VALUES (?, ?, ?, 'byo', ?, ?, 1, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (key_id, user_id, provider, encrypted, hint, now, now),
+            (key_id, user_id, provider, route, encrypted, hint, 1, metadata, now, now),
         )
         conn.commit()
     return {"id": key_id, "provider": provider, "key_hint": hint, "active": True}
@@ -289,6 +325,33 @@ def get_api_key(provider: str, user_id: str = LOCAL_USER_ID, path: Optional[Path
     if not row or not row["encrypted_key"]:
         return None
     return _decrypt_secret(row["encrypted_key"])
+
+
+def get_api_key_with_metadata(provider: str, user_id: str = LOCAL_USER_ID, path: Optional[Path] = None) -> Optional[dict]:
+    """Get API key and metadata for a provider."""
+    provider = provider.strip().lower()
+    init_db(path)
+    with sqlite3.connect(path or db_path()) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT encrypted_key, metadata
+            FROM api_keys
+            WHERE user_id = ? AND provider = ? AND active = 1
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (user_id, provider),
+        ).fetchone()
+    if not row or not row["encrypted_key"]:
+        return None
+    result = {"api_key": _decrypt_secret(row["encrypted_key"])}
+    if row["metadata"]:
+        try:
+            result["metadata"] = json.loads(row["metadata"])
+        except json.JSONDecodeError:
+            result["metadata"] = {}
+    return result
 
 
 def delete_api_key(provider: str, user_id: str = LOCAL_USER_ID, path: Optional[Path] = None) -> dict:
@@ -607,6 +670,115 @@ def _key_hint(api_key: str) -> str:
     if len(api_key) <= 8:
         return "*" * len(api_key)
     return f"{api_key[:4]}...{api_key[-4:]}"
+
+
+EMAIL_PROVIDERS: dict[str, dict] = {
+    "gmail": {"imap_host": "imap.gmail.com", "imap_port": 993, "imap_ssl": True, "smtp_host": "smtp.gmail.com", "smtp_port": 465, "smtp_ssl": True},
+    "outlook": {"imap_host": "outlook.office365.com", "imap_port": 993, "imap_ssl": True, "smtp_host": "smtp.office365.com", "smtp_port": 587, "smtp_ssl": False},
+    "icloud": {"imap_host": "imap.mail.me.com", "imap_port": 993, "imap_ssl": True, "smtp_host": "smtp.mail.me.com", "smtp_port": 587, "smtp_ssl": False},
+    "yahoo": {"imap_host": "imap.mail.yahoo.com", "imap_port": 993, "imap_ssl": True, "smtp_host": "smtp.mail.yahoo.com", "smtp_port": 465, "smtp_ssl": True},
+    "qq": {"imap_host": "imap.qq.com", "imap_port": 993, "imap_ssl": True, "smtp_host": "smtp.qq.com", "smtp_port": 465, "smtp_ssl": True},
+    "163": {"imap_host": "imap.163.com", "imap_port": 993, "imap_ssl": True, "smtp_host": "smtp.163.com", "smtp_port": 465, "smtp_ssl": True},
+}
+
+
+def save_email_account(
+    email_address: str,
+    username: str,
+    password: str,
+    imap_host: str,
+    imap_port: int = 993,
+    imap_ssl: bool = True,
+    smtp_host: str = "",
+    smtp_port: int = 465,
+    smtp_ssl: bool = True,
+    label: str = "",
+    user_id: str = LOCAL_USER_ID,
+    path: Optional[Path] = None,
+) -> dict:
+    init_db(path)
+    ensure_local_user(user_id, path)
+    account_id = str(uuid.uuid4())
+    now = time.time()
+    encrypted = _encrypt_secret(password)
+    hint = f"...{password[-4:]}" if len(password) >= 4 else "****"
+    effective_smtp = smtp_host.strip() or imap_host
+    with sqlite3.connect(path or db_path()) as conn:
+        conn.execute(
+            """
+            INSERT INTO email_accounts
+              (id, user_id, label, email_address, username,
+               imap_host, imap_port, imap_ssl,
+               smtp_host, smtp_port, smtp_ssl,
+               encrypted_password, password_hint, active, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+            """,
+            (
+                account_id, user_id, label or email_address, email_address,
+                username or email_address,
+                imap_host, imap_port, 1 if imap_ssl else 0,
+                effective_smtp, smtp_port, 1 if smtp_ssl else 0,
+                encrypted, hint, now, now,
+            ),
+        )
+        conn.commit()
+    return {
+        "id": account_id,
+        "email_address": email_address,
+        "label": label or email_address,
+        "imap_host": imap_host,
+        "imap_port": imap_port,
+        "imap_ssl": bool(imap_ssl),
+        "smtp_host": effective_smtp,
+        "smtp_port": smtp_port,
+        "smtp_ssl": bool(smtp_ssl),
+        "password_hint": hint,
+        "active": True,
+    }
+
+
+def list_email_accounts(user_id: str = LOCAL_USER_ID, path: Optional[Path] = None) -> list[dict]:
+    init_db(path)
+    with sqlite3.connect(path or db_path()) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """SELECT id, label, email_address, username, imap_host, imap_port, imap_ssl,
+               smtp_host, smtp_port, smtp_ssl, password_hint
+               FROM email_accounts WHERE user_id=? AND active=1 ORDER BY updated_at DESC""",
+            (user_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_email_account(account_id: str, path: Optional[Path] = None) -> Optional[dict]:
+    init_db(path)
+    with sqlite3.connect(path or db_path()) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM email_accounts WHERE id=? AND active=1",
+            (account_id,),
+        ).fetchone()
+    if not row:
+        return None
+    d = dict(row)
+    try:
+        d["password"] = _decrypt_secret(d.pop("encrypted_password"))
+    except Exception:
+        d["password"] = ""
+        d.pop("encrypted_password", None)
+    return d
+
+
+def delete_email_account(account_id: str, path: Optional[Path] = None) -> dict:
+    init_db(path)
+    now = time.time()
+    with sqlite3.connect(path or db_path()) as conn:
+        conn.execute(
+            "UPDATE email_accounts SET active=0, updated_at=? WHERE id=?",
+            (now, account_id),
+        )
+        conn.commit()
+    return {"ok": True, "id": account_id}
 
 
 init_db()

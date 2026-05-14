@@ -53,14 +53,38 @@ _READABLE_SUFFIXES = {
     ".docx",
 }
 _READABLE_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
-_WRITABLE_TEXT_SUFFIXES = {".txt", ".md", ".json", ".csv", ".html", ".css", ".js", ".jsx", ".ts", ".tsx", ".py"}
+_WRITABLE_TEXT_SUFFIXES = {".txt", ".md", ".json", ".csv", ".html", ".css", ".js", ".jsx", ".ts", ".tsx", ".py", ".ics"}
 _MAX_READ_CHARS = 50_000
 _CHAT_AUTHORIZED_PATHS: ContextVar[tuple[Path, ...]] = ContextVar("chat_authorized_paths", default=())
 _TERMINAL_ACCESS_OVERRIDE: ContextVar[Optional[str]] = ContextVar("terminal_access_override", default=None)
+_PERMISSION_SCOPE_OVERRIDE: ContextVar[Optional[str]] = ContextVar("permission_scope_override", default=None)
 _MEMORY_TYPES = {"preference", "project", "rule", "temporary"}
 _REMEMBER_KEYWORDS = ("记住", "保存", "保存到记忆", "加入记忆", "remember", "save this", "save this memory")
 _FORGET_KEYWORDS = ("删除记忆", "删掉记忆", "忘记", "forget", "delete memory", "remove memory")
-_TERMINAL_KEYWORDS = ("终端", "命令", "shell", "terminal", "command", "run", "执行", "运行", "打开", "启动")
+_TERMINAL_KEYWORDS = (
+    "终端",
+    "命令",
+    "shell",
+    "terminal",
+    "command",
+    "run",
+    "执行",
+    "运行",
+    "打开",
+    "启动",
+    # 文件级操作也算“明确授权”（用于 rm/mv 等）
+    "删除",
+    "删掉",
+    "移到废纸篓",
+    "废纸篓",
+    "回收站",
+    "trash",
+    "确认执行",
+    "可以运行",
+    "允许运行",
+    "rm",
+    "mv",
+)
 _BLOCKED_TERMINAL_PATTERNS = (
     r"\brm\s+-rf\s+/",
     r"\bsudo\b",
@@ -179,6 +203,15 @@ def terminal_access_override(access: Optional[str]):
         _TERMINAL_ACCESS_OVERRIDE.reset(token)
 
 
+@contextmanager
+def permission_scope_override(scope: Optional[str]):
+    token = _PERMISSION_SCOPE_OVERRIDE.set(scope)
+    try:
+        yield
+    finally:
+        _PERMISSION_SCOPE_OVERRIDE.reset(token)
+
+
 def _authorized_path(path: str) -> Optional[Path]:
     target = (Path(path) if Path(path).is_absolute() else (settings.workspace_dir / path)).resolve()
     if _permission_scope() == "full_computer":
@@ -202,6 +235,9 @@ def _authorized_path(path: str) -> Optional[Path]:
 
 
 def _permission_scope() -> str:
+    override = _PERMISSION_SCOPE_OVERRIDE.get()
+    if override:
+        return "full_computer" if override == "full_computer" else "workspace"
     try:
         scope = accounting.get_setup_state().get("permission_scope", "workspace")
     except Exception:
@@ -544,6 +580,46 @@ def draft_email_reply(
     return {"draft": resp["choices"][0]["message"]["content"]}
 
 
+# ---- 邮件账户读取 ----
+
+def list_inbox(account_id: str, limit: int = 20) -> dict:
+    """读取已配置邮件账户的收件箱，返回最新邮件列表（仅标题/发件人/时间，不含正文）。"""
+    from . import email_client
+    account = accounting.get_email_account(account_id)
+    if not account:
+        return {"error": f"email account not found: {account_id}"}
+    try:
+        emails = email_client.list_inbox(account, limit=int(limit))
+        return {"emails": emails, "count": len(emails), "account": account.get("email_address")}
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}"}
+
+
+def search_emails(account_id: str, query: str, limit: int = 10) -> dict:
+    """在已配置邮件账户中按关键词搜索邮件（匹配主题或发件人）。"""
+    from . import email_client
+    account = accounting.get_email_account(account_id)
+    if not account:
+        return {"error": f"email account not found: {account_id}"}
+    try:
+        emails = email_client.search_emails(account, query=query, limit=int(limit))
+        return {"emails": emails, "count": len(emails), "query": query}
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}"}
+
+
+def get_email_thread(account_id: str, uid: str) -> dict:
+    """读取一封邮件的完整正文（用于进一步总结、提取任务或起草回复）。"""
+    from . import email_client
+    account = accounting.get_email_account(account_id)
+    if not account:
+        return {"error": f"email account not found: {account_id}"}
+    try:
+        return email_client.get_email_content(account, uid=uid)
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}"}
+
+
 # ---- 记忆 ----
 
 _MEMORY_CANDIDATE_PROMPT = """请从以下文本中提取值得长期记住的信息（用户偏好、项目背景、工作规则、重要决定）。
@@ -754,6 +830,9 @@ _RISK = {
     "summarize_email_text": "low",
     "extract_email_tasks": "low",
     "draft_email_reply": "low",
+    "list_inbox": "low",
+    "search_emails": "low",
+    "get_email_thread": "low",
     "make_markdown_report": "low",
     "make_spreadsheet": "low",
     "make_webpage": "medium",
@@ -1118,6 +1197,52 @@ TOOL_SCHEMAS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "list_inbox",
+            "description": "读取已配置邮件账户的收件箱最新邮件（仅标题/发件人/时间，不含正文）。需先在设置里添加邮件账户并获取 account_id。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "account_id": {"type": "string", "description": "邮件账户 ID（从设置中的邮件账户列表获取）"},
+                    "limit": {"type": "integer", "description": "返回最多几封，默认 20，最大 50"},
+                },
+                "required": ["account_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_emails",
+            "description": "在已配置邮件账户中按关键词搜索邮件，匹配主题或发件人。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "account_id": {"type": "string", "description": "邮件账户 ID"},
+                    "query": {"type": "string", "description": "搜索关键词（匹配主题或发件人）"},
+                    "limit": {"type": "integer", "description": "最多返回几封，默认 10，最大 30"},
+                },
+                "required": ["account_id", "query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_email_thread",
+            "description": "读取一封邮件的完整正文内容，用于进一步总结、提取任务或起草回复。uid 来自 list_inbox 或 search_emails 的返回值。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "account_id": {"type": "string", "description": "邮件账户 ID"},
+                    "uid": {"type": "string", "description": "邮件 UID（来自 list_inbox 或 search_emails 结果）"},
+                },
+                "required": ["account_id", "uid"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "list_outputs",
             "description": "列出最近生成的输出文件（表格/网页/报告）。",
             "parameters": {"type": "object", "properties": {}},
@@ -1221,6 +1346,9 @@ _DISPATCH = {
     "summarize_email_text": summarize_email_text,
     "extract_email_tasks": extract_email_tasks,
     "draft_email_reply": draft_email_reply,
+    "list_inbox": list_inbox,
+    "search_emails": search_emails,
+    "get_email_thread": get_email_thread,
     "make_markdown_report": make_markdown_report,
     "make_spreadsheet": make_spreadsheet,
     "make_webpage": make_webpage,
@@ -1291,6 +1419,19 @@ def run_tool(
                    task_id=task_id, user_input=user_input, model=model,
                    token_usage=token_usage, status="blocked", error=err)
         return {"error": err}
+
+    # 终端删除安全：默认只允许“移到废纸篓/回收站”，禁止直接 rm（除非用户明确要求永久删除）
+    if name == "run_terminal_command":
+        cmd = str(arguments.get("command") or "").strip().lower()
+        user_text = (user_input or "").lower()
+        wants_permanent = any(k in user_text for k in ("永久删除", "彻底删除", "不可恢复", "permanently", "permanent delete"))
+        uses_rm = bool(re.search(r"(^|\\s)rm(\\s|$)", cmd))
+        if uses_rm and not wants_permanent:
+            err = "为防止误删：默认不允许使用 rm 永久删除。请改为“移到废纸篓/回收站（可恢复）”，或在当前消息里明确说明“永久/彻底删除”后再执行。"
+            _write_log(name, arguments, {"error": err}, 0,
+                       task_id=task_id, user_input=user_input, model=model,
+                       token_usage=token_usage, status="blocked", error=err)
+            return {"error": err}
 
     t0 = time.time()
     try:
