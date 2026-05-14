@@ -305,9 +305,9 @@
 
 目标：做一个独立的 API 计费网站。普通用户不用理解大模型 API key，也能登录、充值、使用 Auctus 托管 API 额度；高级用户仍可选择 BYO Key。
 
-> ⚠️ **注意**：Phase 13 已在独立项目 `api计费网站/` 文件夹中开发，不再放在 secretary 项目内。
+> ⚠️ **注意**：Phase 13 已拆到独立 GitHub 项目 `auctus-api/` 中开发，不再放在 `auctus-agent` 项目内。
 
-**核心功能已完成（api计费网站/）：**
+**核心功能已完成（auctus-api/）：**
 - [x] 项目结构搭建（FastAPI + SQLAlchemy + SQLite）
 - [x] 用户认证：注册、登录、JWT 令牌
 - [x] API Key 管理：创建、撤销
@@ -363,4 +363,41 @@
 
 ---
 
-_最后更新：2026-05-14（补充：安装一键入口、UI 视觉升级、权限体系（终端/日历/文件）、本地自动化 cron、对话摘要按 token/分段累计；并扩展 Closed Learning Loop 规划）_
+### Phase 13.5：GitHub 拆仓、版本与 0.1.0 内测发布 ✅ 已完成
+
+目标：把本地 Agent 和云端 API 拆成两个可独立发布、独立部署、独立打 tag 的 GitHub 仓库，并建立最小 release 流程。
+
+- [x] 本地 Agent 仓库拆分为 `auctus-agent`
+- [x] 托管 API / 计费网站仓库拆分为 `auctus-api`
+- [x] `auctus-agent` 增加统一版本号：`app/version.py`
+- [x] `auctus-agent` 增加版本接口：`GET /api/version`
+- [x] `auctus-api` 版本号调整为 `0.1.0`
+- [x] `auctus-api` 增加版本与 Agent 更新信息接口：`GET /version`
+- [x] 两个项目都补 `.gitignore`，排除 `.env`、本地数据库、日志、输出、虚拟环境和用户文件
+- [x] `auctus-api` 补 `.env.example`
+- [x] 两个项目都补发布规则文档：`docs/release.md`
+- [x] `auctus-agent` 推送到 GitHub：`ddjiang327/auctus-agent`
+- [x] `auctus-api` 推送到 GitHub：`ddjiang327/auctus-api`
+- [x] `auctus-agent` 打 tag：`agent-v0.1.0`
+- [x] `auctus-api` 打 tag：`api-v0.1.0`
+- [x] `auctus-agent` 生成 macOS / Windows zip 安装包
+- [x] `auctus-agent` GitHub Release 发布：`agent-v0.1.0`
+
+**当前发布地址：**
+
+```text
+Agent repo: https://github.com/ddjiang327/auctus-agent
+Agent release: https://github.com/ddjiang327/auctus-agent/releases/tag/agent-v0.1.0
+API repo: https://github.com/ddjiang327/auctus-api
+```
+
+**下一步：**
+
+- [ ] 给 `auctus-api` 补基础自动化测试
+- [ ] 部署 `auctus-api` staging 环境
+- [ ] 让 `auctus-agent` 首次设置支持本地 / staging / production 托管 API 地址
+- [ ] 在 `auctus-agent` 设置页显示当前版本、最新版本和下载入口
+
+---
+
+_最后更新：2026-05-14（补充：GitHub 拆仓、版本接口、0.1.0 tag、Agent 安装包与 GitHub Release；下一步进入 auctus-api 测试和 staging 部署）_
