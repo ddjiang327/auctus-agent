@@ -393,11 +393,84 @@ API repo: https://github.com/ddjiang327/auctus-api
 
 **下一步：**
 
-- [ ] 给 `auctus-api` 补基础自动化测试
+- [x] 给 `auctus-api` 补基础自动化测试
 - [ ] 部署 `auctus-api` staging 环境
 - [ ] 让 `auctus-agent` 首次设置支持本地 / staging / production 托管 API 地址
-- [ ] 在 `auctus-agent` 设置页显示当前版本、最新版本和下载入口
+- [x] 在 `auctus-agent` 设置页显示当前版本、最新版本和下载入口
 
 ---
 
-_最后更新：2026-05-14（补充：GitHub 拆仓、版本接口、0.1.0 tag、Agent 安装包与 GitHub Release；下一步进入 auctus-api 测试和 staging 部署）_
+### Phase 13.6：朋友试用版分发、域名与 staging 闭环
+
+目标：拿到一个能发给朋友安装试用的 Auctus Agent 测试版，并把下载页、API staging、国内访问、收款测试和反馈入口串成一个可执行闭环。
+
+**推荐线上结构：**
+
+```text
+www.leyoustudio.com                 Netlify：品牌页 / 下载页 / 安装说明
+download.leyoustudio.com        Netlify 或 GitHub Releases：Agent zip 下载
+api.leyoustudio.com             Vercel：海外 API / 账号 / 计费 / Relay
+cn-api.leyoustudio.com          阿里云 ECS：中国用户低延迟 API / Relay
+account.leyoustudio.com         API dashboard 或 Netlify 静态入口 + API
+www.leyoustudio.com/pay             测试期收款说明 / 支付链接 / 付款后填写邮箱或订单号
+```
+
+**短期产品路径：**
+
+```text
+Netlify 下载页
+  -> 下载 Auctus Agent 测试包
+  -> 双击 Setup.command / Setup.bat
+  -> 首次启动向导
+  -> 选择：
+     1. 自己填 API Key（最快可用）
+     2. 使用 Auctus 托管额度（中国用户优先走 cn-api.leyoustudio.com）
+     3. 本地模型
+  -> 完成一个真实任务
+  -> 需要额度时进入 /pay 或 dashboard 充值入口
+  -> 用户反馈安装、配置、任务失败或扣费问题
+```
+
+**部署策略：**
+
+- [ ] 下载页继续放 Netlify：适合静态页、下载说明、安装教程、反馈入口和快速改文案
+- [ ] Agent 安装包先放 GitHub Releases：`Auctus-Agent-mac-v0.1.1.zip` / `Auctus-Agent-windows-v0.1.1.zip`
+- [ ] Netlify 下载页链接 GitHub Release assets；后续可同步到 Netlify 或阿里云 OSS/CDN
+- [ ] 海外 API staging 放 Vercel：`api.leyoustudio.com`
+- [ ] 国内 API staging 放阿里云 ECS：`cn-api.leyoustudio.com`
+- [ ] 若自定义域名正式绑定中国大陆 ECS，需要先确认 ICP 备案；备案前可先用 Netlify/Vercel 或阿里云香港/新加坡节点
+- [ ] API dashboard 短期可继续使用 `auctus-api/static/dashboard.html`，后续再拆成独立前端
+
+**收款测试策略：**
+
+- [ ] 测试期先接“跳转收款链接 / 二维码页”，不先做完整支付 webhook
+- [ ] `/pay` 页面展示体验包、月度测试包、支付方式和付款后填写邮箱/订单号的入口
+- [ ] 付款后由管理员手动给账号充值，验证余额、交易记录、扣费和充值入口体验
+- [ ] 等 3-5 个朋友真实跑完安装和任务后，再接 Stripe / Alipay / WeChat Pay webhook
+
+**7 天执行计划：**
+
+1. 打 Agent 测试包：生成 Mac / Windows zip，版本 `agent-v0.1.1`，确认双击安装可用。
+2. 做下载页：`www.leyoustudio.com/download` 放下载按钮、安装步骤、更新日志、反馈入口。
+3. 部署 API staging：海外 Vercel `api.leyoustudio.com`，中国阿里云 `cn-api.leyoustudio.com`。
+4. 配置 Agent 默认托管 API：首次向导支持中国 / 海外 / 自定义 API 地址。
+5. 接入收款链接：`www.leyoustudio.com/pay` 和 dashboard 充值入口先跳转到测试收款页。
+6. 发给 3-5 个朋友试用：只要求安装、配置模型、完成一个真实任务。
+7. 只修阻塞问题：安装失败、启动失败、API 连接失败、充值显示错误、任务执行失败。
+
+**验收标准：**
+
+- [ ] 朋友能从 `www.leyoustudio.com/download` 下载 Mac 或 Windows 测试包
+- [ ] 非技术用户能双击安装并在 10 分钟内进入首次设置向导
+- [ ] 用户能选择 BYO Key、Auctus 托管 API 或本地模型
+- [ ] 中国用户能通过 `cn-api.leyoustudio.com` 完成登录、额度查看和一次托管 API 对话
+- [ ] 海外用户能通过 `api.leyoustudio.com` 完成登录、额度查看和一次托管 API 对话
+- [ ] 充值入口能跳转到测试收款页，并支持人工充值后余额变化可见
+- [ ] 下载页、安装包、版本接口和更新入口指向一致，不出现旧版本链接
+- [ ] 收到至少 3 个真实用户的安装和任务反馈
+
+备注：这一阶段不追求完整商业支付和生产级双区域数据同步，核心是拿到“可安装、可启动、可完成任务、可测试充值”的朋友试用版。
+
+---
+
+_最后更新：2026-05-16（Phase 13.7 macOS .pkg 构建脚本 + Phase 13.8 Windows .exe 安装程序脚本已完成）_

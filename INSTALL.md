@@ -4,19 +4,19 @@ Auctus Agent 是本地运行的个人 AI Agent。它会在本机保存对话、�
 
 ## 一键 Setup（推荐，适合普通用户）
 
-在项目根目录（包含 `secretary/` 的那一层）：
+在项目根目录（包含 `auctus-agent/` 的那一层）：
 
 - Mac：双击 `Setup.command`
 - Windows：双击 `Setup.bat`
 
-第一次打开会进入“首次设置向导”，可以在网页里选择模型接入方式并填写/验证 API key（无需手动编辑 `.env`）。
+第一次打开会进入"首次设置向导"，可以在网页里选择模型接入方式并填写/验证 API key（无需手动编辑 `.env`）。
 
-> 如果 macOS 提示“无法打开”或没有执行权限：在终端进入项目根目录后运行 `chmod +x Setup.command Start.command` 再双击。
+> 如果 macOS 提示"无法打开"或没有执行权限：在终端进入项目根目录后运行 `chmod +x Setup.command Start.command` 再双击。
 
 ## Mac 安装
 
 ```bash
-cd secretary
+cd auctus-agent
 scripts/install_mac.sh
 ```
 
@@ -47,7 +47,7 @@ http://127.0.0.1:8000
 在 PowerShell 里运行：
 
 ```powershell
-cd secretary
+cd auctus-agent
 powershell -ExecutionPolicy Bypass -File .\scripts\install_windows.ps1
 ```
 

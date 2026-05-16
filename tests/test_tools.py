@@ -41,7 +41,8 @@ class ToolSafetyTests(unittest.TestCase):
         evil_file = evil_dir / "secret.md"
         evil_file.write_text("secret", encoding="utf-8")
 
-        result = tools.read_file(str(evil_file))
+        with patch("app.tools.accounting.get_setup_state", return_value={"permission_scope": "workspace"}):
+            result = tools.read_file(str(evil_file))
 
         self.assertIn("error", result)
         self.assertIn("outside authorized workspace", result["error"])
@@ -137,6 +138,84 @@ class ToolSafetyTests(unittest.TestCase):
         self.assertEqual(kwargs["type"], "project")
         self.assertEqual(kwargs["importance"], 5)
 
+    def test_ui_confirmed_soft_trash_command_can_omit_confirmed_flag(self):
+        original = tools._DISPATCH["run_terminal_command"]
+        try:
+            with tools.terminal_access_override("enabled"):
+                tools._DISPATCH["run_terminal_command"] = lambda **kwargs: {"returncode": 0, "command": kwargs["command"]}
+                result = tools.run_tool(
+                    "run_terminal_command",
+                    {"command": "mv /Users/david/Desktop/1.md ~/.Trash/"},
+                    user_input="把 1.md 移到废纸篓/回收站（不要永久删除）。",
+                )
+        finally:
+            tools._DISPATCH["run_terminal_command"] = original
+
+        self.assertEqual(result["returncode"], 0)
+
+    def test_unconfirmed_permanent_delete_stays_blocked(self):
+        original = tools._DISPATCH["run_terminal_command"]
+        try:
+            with tools.terminal_access_override("enabled"):
+                tools._DISPATCH["run_terminal_command"] = lambda **kwargs: {"returncode": 0}
+                result = tools.run_tool(
+                    "run_terminal_command",
+                    {"command": "rm /Users/david/Desktop/1.md"},
+                    user_input="把 1.md 移到废纸篓/回收站（不要永久删除）。",
+                )
+        finally:
+            tools._DISPATCH["run_terminal_command"] = original
+
+        self.assertIn("error", result)
+        self.assertIn("confirmed", result["error"])
+
+    def test_affirmative_reply_allows_safe_restore_from_trash(self):
+        original = tools._DISPATCH["run_terminal_command"]
+        try:
+            with tools.terminal_access_override("enabled"):
+                tools._DISPATCH["run_terminal_command"] = lambda **kwargs: {"returncode": 0, "command": kwargs["command"]}
+                result = tools.run_tool(
+                    "run_terminal_command",
+                    {"command": "mv ~/.Trash/1.md ~/Desktop/"},
+                    user_input="是",
+                )
+        finally:
+            tools._DISPATCH["run_terminal_command"] = original
+
+        self.assertEqual(result["returncode"], 0)
+
+    def test_extract_memory_candidates_keeps_profile_and_drops_ephemeral_paths(self):
+        llm_payload = [
+            {
+                "key": "User profile",
+                "value": "David，44岁，程序员，住在墨尔本 Oakleigh South",
+                "type": "preference",
+                "importance": 4,
+            },
+            {
+                "key": "Working directory",
+                "value": "工作目录是桌面上的 test/ 文件夹",
+                "type": "project",
+                "importance": 3,
+            },
+            {
+                "key": "Desktop files",
+                "value": "桌面上有 个人/ 文件夹和 1.md（刚删了）",
+                "type": "project",
+                "importance": 3,
+            },
+        ]
+        with patch("app.tools.llm.chat_completion", return_value={"choices": [{"message": {"content": json.dumps(llm_payload)}}]}):
+            with patch("app.tools.memory.store_candidate", return_value="memory-profile") as store:
+                result = tools.extract_memory_candidates("profile and paths")
+
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(result["candidates"][0]["key"], "User profile")
+        self.assertEqual(result["candidates"][0]["importance"], 4)
+        store.assert_called_once()
+        _, kwargs = store.call_args
+        self.assertIn("David", kwargs["value"])
+
     def test_write_file_allows_workspace_text_file(self):
         result = tools.write_file("notes/todo.md", "hello")
 
@@ -144,13 +223,15 @@ class ToolSafetyTests(unittest.TestCase):
         self.assertEqual((settings.workspace_dir / "notes" / "todo.md").read_text(encoding="utf-8"), "hello")
 
     def test_write_file_rejects_path_outside_workspace(self):
-        result = tools.write_file(str(self.root / "outside.md"), "no")
+        with patch("app.tools.accounting.get_setup_state", return_value={"permission_scope": "workspace"}):
+            result = tools.write_file(str(self.root / "outside.md"), "no")
 
         self.assertIn("error", result)
         self.assertIn("outside authorized workspace", result["error"])
 
-    def test_terminal_command_is_disabled_by_default(self):
-        result = tools.run_terminal_command("pwd")
+    def test_terminal_command_can_be_disabled_in_settings(self):
+        with patch("app.tools.accounting.get_setup_state", return_value={"terminal_access": "disabled"}):
+            result = tools.run_terminal_command("pwd")
 
         self.assertIn("error", result)
         self.assertIn("terminal access is disabled", result["error"])
@@ -172,8 +253,9 @@ class ToolSafetyTests(unittest.TestCase):
     def test_terminal_command_rejects_working_directory_outside_workspace(self):
         outside = self.root / "Desktop"
         outside.mkdir()
-        with tools.terminal_access_override("enabled"):
-            result = tools.run_terminal_command("pwd", working_directory=str(outside))
+        with patch("app.tools.accounting.get_setup_state", return_value={"permission_scope": "workspace"}):
+            with tools.terminal_access_override("enabled"):
+                result = tools.run_terminal_command("pwd", working_directory=str(outside))
 
         self.assertIn("error", result)
         self.assertIn("outside allowed scope", result["error"])

@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import httpx
 from fastapi.testclient import TestClient
 
 from app.config import settings
@@ -55,6 +56,39 @@ class ServerApiTests(unittest.TestCase):
         self.assertEqual(data["name"], "Auctus Agent")
         self.assertEqual(data["version"], APP_VERSION)
         self.assertEqual(data["api_compat"], "v1")
+        self.assertIn("download_url", data)
+
+    def test_version_check_uses_local_metadata_without_update_url(self):
+        with patch("app.server.settings.update_check_url", None):
+            response = self.client.get("/api/version/check")
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["version"], APP_VERSION)
+        self.assertEqual(data["latest_version"], APP_VERSION)
+        self.assertFalse(data["update_available"])
+        self.assertEqual(data["source"], "local")
+
+    def test_version_check_reads_remote_agent_release_metadata(self):
+        remote_response = httpx.Response(
+            200,
+            json={
+                "latest_agent_version": "99.0.0",
+                "agent_download_url": "https://example.com/auctus",
+            },
+            request=httpx.Request("GET", "https://api.example/version"),
+        )
+        with patch("app.server.settings.update_check_url", "https://api.example/version"):
+            with patch("app.server.httpx.get", return_value=remote_response) as get_mock:
+                response = self.client.get("/api/version/check")
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["latest_version"], "99.0.0")
+        self.assertEqual(data["download_url"], "https://example.com/auctus")
+        self.assertTrue(data["update_available"])
+        self.assertEqual(data["source"], "remote")
+        get_mock.assert_called_once_with("https://api.example/version", timeout=5)
 
     def test_upload_rejects_empty_file(self):
         response = self.client.post("/api/upload?filename=empty.md", content=b"")
@@ -227,12 +261,12 @@ class ServerApiTests(unittest.TestCase):
         self.assertEqual(state.json()["language"], "en")
         self.assertEqual(onboarding.json()["system_language"], "en")
 
-    def test_language_rejects_unknown_by_falling_back_to_chinese(self):
+    def test_language_rejects_unknown_by_falling_back_to_english(self):
         with patch("app.accounting.db_path", return_value=settings.data_dir / "secretary.db"):
             response = self.client.post("/api/language", json={"language": "fr"})
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["language"], "zh")
+        self.assertEqual(response.json()["language"], "en")
 
     def test_hosted_region_can_be_changed_from_settings(self):
         with patch("app.accounting.db_path", return_value=settings.data_dir / "secretary.db"):
@@ -287,12 +321,23 @@ class ServerApiTests(unittest.TestCase):
         self.assertEqual(state.json()["scope"], "full_computer")
         self.assertEqual(onboarding.json()["permission_scope"], "full_computer")
 
-    def test_permission_scope_unknown_falls_back_to_workspace(self):
+    def test_fresh_install_defaults_to_full_computer_and_terminal_enabled(self):
+        with patch("app.accounting.db_path", return_value=settings.data_dir / "secretary.db"):
+            onboarding = self.client.get("/api/onboarding")
+            permission = self.client.get("/api/permission-scope")
+            terminal = self.client.get("/api/terminal-access")
+
+        self.assertEqual(onboarding.json()["permission_scope"], "full_computer")
+        self.assertEqual(onboarding.json()["terminal_access"], "enabled")
+        self.assertEqual(permission.json()["scope"], "full_computer")
+        self.assertEqual(terminal.json()["access"], "enabled")
+
+    def test_permission_scope_unknown_falls_back_to_default_full_computer(self):
         with patch("app.accounting.db_path", return_value=settings.data_dir / "secretary.db"):
             response = self.client.post("/api/permission-scope", json={"scope": "root"})
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["scope"], "workspace")
+        self.assertEqual(response.json()["scope"], "full_computer")
 
     def test_terminal_access_can_be_changed_from_settings(self):
         with patch("app.accounting.db_path", return_value=settings.data_dir / "secretary.db"):
@@ -305,12 +350,12 @@ class ServerApiTests(unittest.TestCase):
         self.assertEqual(state.json()["access"], "enabled")
         self.assertEqual(onboarding.json()["terminal_access"], "enabled")
 
-    def test_terminal_access_unknown_falls_back_to_disabled(self):
+    def test_terminal_access_unknown_falls_back_to_default_enabled(self):
         with patch("app.accounting.db_path", return_value=settings.data_dir / "secretary.db"):
             response = self.client.post("/api/terminal-access", json={"access": "root"})
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["access"], "disabled")
+        self.assertEqual(response.json()["access"], "enabled")
 
     def test_workspace_can_be_authorized(self):
         target = self.root / "authorized"
@@ -423,6 +468,7 @@ class ServerApiTests(unittest.TestCase):
 
     def test_chat_requests_terminal_permission_when_disabled(self):
         with patch("app.accounting.db_path", return_value=settings.data_dir / "secretary.db"):
+            self.client.post("/api/terminal-access", json={"access": "disabled"})
             with patch("app.server.agent.chat") as chat_mock:
                 response = self.client.post(
                     "/api/chat",
@@ -435,6 +481,7 @@ class ServerApiTests(unittest.TestCase):
 
     def test_chat_requests_terminal_permission_for_opening_local_html(self):
         with patch("app.accounting.db_path", return_value=settings.data_dir / "secretary.db"):
+            self.client.post("/api/terminal-access", json={"access": "disabled"})
             with patch("app.server.agent.chat") as chat_mock:
                 response = self.client.post(
                     "/api/chat",
@@ -447,6 +494,7 @@ class ServerApiTests(unittest.TestCase):
 
     def test_chat_terminal_permission_once_does_not_save_setting(self):
         with patch("app.accounting.db_path", return_value=settings.data_dir / "secretary.db"):
+            self.client.post("/api/terminal-access", json={"access": "disabled"})
             with patch("app.server.agent.chat", return_value={"reply": "done", "files": []}) as chat_mock:
                 response = self.client.post(
                     "/api/chat",

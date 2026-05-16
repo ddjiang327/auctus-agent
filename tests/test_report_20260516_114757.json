@@ -1,0 +1,91 @@
+{
+  "version": "0.1.17",
+  "timestamp": "2026-05-16T11:47:57.479221",
+  "total": 8,
+  "passed": 7,
+  "failed": 1,
+  "errors": 0,
+  "skipped": 0,
+  "results": [
+    {
+      "id": "syntax",
+      "name": "Python Syntax Check",
+      "category": "basic",
+      "status": "pass",
+      "duration": 0.20909643173217773,
+      "message": "Syntax OK",
+      "expected": "",
+      "actual": ""
+    },
+    {
+      "id": "imports",
+      "name": "Required Imports",
+      "category": "basic",
+      "status": "fail",
+      "duration": 0.15486383438110352,
+      "message": "Missing: webview, pystray, pynput, plyer",
+      "expected": "",
+      "actual": ""
+    },
+    {
+      "id": "version",
+      "name": "Version Format",
+      "category": "basic",
+      "status": "pass",
+      "duration": 0.001361846923828125,
+      "message": "Version: 0.1.17",
+      "expected": "",
+      "actual": ""
+    },
+    {
+      "id": "ui_html",
+      "name": "UI HTML Exists",
+      "category": "basic",
+      "status": "pass",
+      "duration": 1.3113021850585938e-05,
+      "message": "ui.html exists",
+      "expected": "",
+      "actual": ""
+    },
+    {
+      "id": "build_scripts",
+      "name": "Build Scripts Exist",
+      "category": "build",
+      "status": "pass",
+      "duration": 0.0001914501190185547,
+      "message": "All scripts exist",
+      "expected": "",
+      "actual": ""
+    },
+    {
+      "id": "build_syntax",
+      "name": "Build Script Syntax",
+      "category": "build",
+      "status": "pass",
+      "duration": 0.0035080909729003906,
+      "message": "All scripts valid",
+      "expected": "",
+      "actual": ""
+    },
+    {
+      "id": "desktop_syntax",
+      "name": "Desktop Enhanced Syntax",
+      "category": "desktop",
+      "status": "pass",
+      "duration": 0.20061349868774414,
+      "message": "Syntax OK",
+      "expected": "",
+      "actual": ""
+    },
+    {
+      "id": "requirements",
+      "name": "Requirements Complete",
+      "category": "deps",
+      "status": "pass",
+      "duration": 0.00035309791564941406,
+      "message": "All dependencies listed",
+      "expected": "",
+      "actual": ""
+    }
+  ]
+}

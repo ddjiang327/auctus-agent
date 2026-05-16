@@ -3,12 +3,15 @@ from __future__ import annotations
 
 import json
 import re
+import struct
 import uuid
+import zlib
 from pathlib import Path
 from typing import Optional
 
+import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 import litellm
 from pydantic import BaseModel
@@ -20,8 +23,133 @@ from .version import API_COMPAT_VERSION, APP_NAME, APP_VERSION, RELEASE_CHANNEL
 app = FastAPI(title="Auctus Agent")
 app.include_router(relay.router)
 
+DEFAULT_PERMISSION_SCOPE = "full_computer"
+DEFAULT_TERMINAL_ACCESS = "enabled"
+
 # 输出目录公开下载（仅本地服务，不暴露公网）
 app.mount("/files", StaticFiles(directory=str(settings.output_dir)), name="files")
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    print(f"[server] unhandled error on {request.url.path}: {type(exc).__name__}: {exc}")
+    return JSONResponse(status_code=500, content={"detail": f"{type(exc).__name__}: {exc}"})
+
+
+# ---------- PWA 支持 ----------
+
+def _make_png(size: int) -> bytes:
+    """Generate a minimal PNG icon in dark navy + blue orb style (pure stdlib)."""
+    bg = (7, 10, 18)
+    ring = (45, 124, 255)
+    glow = (0, 245, 255)
+    cx = cy = size // 2
+    r_outer = int(size * 0.42)
+    r_inner = int(size * 0.28)
+    r_dot = int(size * 0.08)
+
+    rows = bytearray()
+    for y in range(size):
+        rows.append(0)  # PNG filter byte: None
+        for x in range(size):
+            dx = x - cx
+            dy = y - cy
+            d = (dx * dx + dy * dy) ** 0.5
+            # glow dot center
+            if d <= r_dot:
+                t = 1.0 - d / max(r_dot, 1)
+                px = (
+                    int(glow[0] + t * (255 - glow[0])),
+                    int(glow[1] + t * (255 - glow[1])),
+                    int(glow[2] + t * (255 - glow[2])),
+                    255,
+                )
+            # blue ring
+            elif r_inner <= d <= r_outer:
+                band = r_outer - r_inner
+                t = 1.0 - abs(d - (r_inner + band / 2)) / (band / 2)
+                t = max(0.0, t)
+                px = (
+                    int(bg[0] + t * (ring[0] - bg[0])),
+                    int(bg[1] + t * (ring[1] - bg[1])),
+                    int(bg[2] + t * (ring[2] - bg[2])),
+                    255,
+                )
+            else:
+                px = (*bg, 255)
+            rows.extend(px)
+
+    compressed = zlib.compress(bytes(rows), 6)
+
+    def _chunk(tag: bytes, data: bytes) -> bytes:
+        body = tag + data
+        return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF)
+
+    ihdr = _chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0))
+    idat = _chunk(b"IDAT", compressed)
+    iend = _chunk(b"IEND", b"")
+    return b"\x89PNG\r\n\x1a\n" + ihdr + idat + iend
+
+
+_ICON_192 = _make_png(192)
+_ICON_512 = _make_png(512)
+
+_SW_JS = """\
+self.addEventListener('install', e => {
+  self.skipWaiting();
+});
+
+self.addEventListener('activate', e => {
+  e.waitUntil(
+    caches.keys()
+      .then(keys => Promise.all(keys.map(k => caches.delete(k))))
+      .then(() => self.registration.unregister())
+  );
+  self.clients.claim();
+});
+"""
+
+_MANIFEST = json.dumps({
+    "name": "Auctus Agent",
+    "short_name": "Auctus",
+    "description": "你的私人 AI 秘书",
+    "start_url": "/",
+    "display": "standalone",
+    "orientation": "portrait",
+    "background_color": "#070A12",
+    "theme_color": "#0B1020",
+    "icons": [
+        {"src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
+        {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"},
+    ],
+    "categories": ["productivity", "utilities"],
+}, ensure_ascii=False)
+
+
+@app.get("/manifest.json")
+def pwa_manifest():
+    return Response(content=_MANIFEST, media_type="application/manifest+json")
+
+
+@app.get("/sw.js")
+def pwa_sw():
+    return Response(content=_SW_JS, media_type="application/javascript",
+                    headers={
+                        "Service-Worker-Allowed": "/",
+                        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                    })
+
+
+@app.get("/icon-192.png")
+def icon_192():
+    return Response(content=_ICON_192, media_type="image/png",
+                    headers={"Cache-Control": "public, max-age=604800"})
+
+
+@app.get("/icon-512.png")
+def icon_512():
+    return Response(content=_ICON_512, media_type="image/png",
+                    headers={"Cache-Control": "public, max-age=604800"})
 
 
 @app.get("/api/version")
@@ -33,7 +161,47 @@ def version_info():
         "channel": RELEASE_CHANNEL,
         "api_compat": API_COMPAT_VERSION,
         "update_check_url": settings.update_check_url,
+        "download_url": settings.agent_download_url,
     }
+
+
+@app.get("/api/version/check")
+def version_check():
+    """Return local version plus latest Agent release metadata when configured."""
+    data = {
+        "name": APP_NAME,
+        "version": APP_VERSION,
+        "channel": RELEASE_CHANNEL,
+        "api_compat": API_COMPAT_VERSION,
+        "latest_version": APP_VERSION,
+        "update_available": False,
+        "download_url": settings.agent_download_url,
+        "update_check_url": settings.update_check_url,
+        "source": "local",
+    }
+    if not settings.update_check_url:
+        return data
+
+    try:
+        response = httpx.get(settings.update_check_url, timeout=5)
+        response.raise_for_status()
+        remote = response.json()
+    except Exception as exc:
+        data["source"] = "error"
+        data["error"] = f"{type(exc).__name__}: {exc}"
+        return data
+
+    latest = str(remote.get("latest_agent_version") or remote.get("latest_version") or APP_VERSION)
+    download_url = str(remote.get("agent_download_url") or remote.get("download_url") or settings.agent_download_url)
+    data.update(
+        {
+            "latest_version": latest,
+            "update_available": _is_newer_version(latest, APP_VERSION),
+            "download_url": download_url,
+            "source": "remote",
+        }
+    )
+    return data
 
 
 WEB_UI = (Path(__file__).parent / "ui.html").read_text(encoding="utf-8") if (Path(__file__).parent / "ui.html").exists() else """
@@ -62,6 +230,8 @@ main{height:calc(100vh - 53px);min-height:0}
 @keyframes typingPulse{0%,80%,100%{opacity:.3;transform:translateY(0)}40%{opacity:1;transform:translateY(-3px)}}
 form{display:flex;gap:8px;padding:12px 18px;border-top:1px solid #ddd;background:#fff}
 input,select,button{font:inherit}
+select{color:#222;background:#fff;color-scheme:light}
+select option{color:#222;background:#fff}
 #message{flex:1;padding:10px;border:1px solid #bbb;border-radius:6px}
 button{padding:9px 12px;border:1px solid #999;border-radius:6px;background:#fff;cursor:pointer}
 button.primary{background:#1f6feb;color:white;border-color:#1f6feb}
@@ -243,7 +413,7 @@ h2{font-size:14px;margin:0 0 8px;color:#555;text-transform:uppercase;letter-spac
         </div>
         <div class="field">
           <label for="setupApiKey">API key</label>
-          <input id="setupApiKey" type="password" autocomplete="off" placeholder="sk-...">
+          <input id="setupApiKey" type="password" autocomplete="off" placeholder="已内置试用 Key，可留空">
         </div>
         <div class="row">
           <button id="verifySetupKey" type="button">验证 Key</button>
@@ -837,7 +1007,13 @@ async function sendChat(text, terminalPermission='') {
   const pending = addPendingMessage();
   try {
     const r = await fetch('/api/chat', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({session_id: sid, message: text, terminal_permission: terminalPermission})});
-    const j = await r.json();
+    const raw = await r.text();
+    let j = {};
+    try {
+      j = raw ? JSON.parse(raw) : {};
+    } catch {
+      j = {detail: raw || r.statusText};
+    }
     if (!r.ok) {
       replaceMessage(pending, j.detail || JSON.stringify(j));
       return;
@@ -966,12 +1142,24 @@ async function loadModels() {
     const setupOpt = opt.cloneNode(true);
     setupSel.appendChild(setupOpt);
   });
+  syncProviderToModel();
 }
 document.getElementById('saveModel').onclick = async () => {
   const model = document.getElementById('model').value;
   await fetch('/api/model', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({model})});
   loadModels();
 };
+document.getElementById('setupModel').onchange = syncProviderToModel;
+document.getElementById('model').onchange = syncProviderToModel;
+function syncProviderToModel() {
+  const model = document.getElementById('setupModel')?.value || document.getElementById('model')?.value || '';
+  const provider = model.includes('deepseek') ? 'deepseek' : (model.includes('gpt') ? 'openai' : (model.includes('claude') ? 'anthropic' : ''));
+  if (!provider) return;
+  ['provider', 'setupProvider'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el && [...el.options].some(opt => opt.value === provider)) el.value = provider;
+  });
+}
 async function loadLanguage() {
   const r = await fetch('/api/language');
   const j = await r.json();
@@ -1102,6 +1290,7 @@ async function loadProviders() {
     sel.appendChild(opt);
     setupSel.appendChild(opt.cloneNode(true));
   });
+  syncProviderToModel();
 }
 document.getElementById('saveRoute').onclick = async () => {
   const route = document.getElementById('route').value;
@@ -1259,7 +1448,7 @@ document.getElementById('onboardingForm').onsubmit = async (e) => {
   };
   const error = document.getElementById('setupError');
   error.textContent = '';
-  if (mode === 'own_api') {
+  if (mode === 'own_api' && payload.api_key) {
     const valid = await validateApiKey({
       provider: payload.provider,
       api_key: payload.api_key,
@@ -1471,6 +1660,13 @@ class HostedRegionDetectIn(BaseModel):
     languages: list[str] = []
 
 
+class HostedLoginIn(BaseModel):
+    base_url: str = "http://120.24.223.0"
+    email: str
+    password: str
+    region: str = "auto"
+
+
 class PermissionScopeIn(BaseModel):
     scope: str
 
@@ -1534,9 +1730,19 @@ class MemoryListOut(BaseModel):
     items: list[dict]
 
 
+@app.post("/api/shutdown")
+def shutdown():
+    import threading, os, signal
+    threading.Timer(0.5, lambda: os.kill(os.getpid(), signal.SIGTERM)).start()
+    return {"ok": True}
+
+
 @app.get("/", response_class=HTMLResponse)
 def index():
-    return WEB_UI
+    return HTMLResponse(
+        WEB_UI,
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
+    )
 
 
 @app.get("/landing", response_class=HTMLResponse)
@@ -1588,8 +1794,9 @@ def onboarding_state() -> dict:
         "agent_name": state.get("agent_name", ""),
         "persona": state.get("persona", "professional"),
         "system_language": state.get("system_language", "zh"),
+        "system_language_configured": "system_language" in state,
         "hosted_region": _normalize_hosted_region(state.get("hosted_region")),
-        "hosted_base_url": state.get("hosted_base_url", "http://localhost:8001"),
+        "hosted_base_url": state.get("hosted_base_url", "http://120.24.223.0"),
         "permission_scope": _normalize_permission_scope(state.get("permission_scope")),
         "terminal_access": _normalize_terminal_access(state.get("terminal_access")),
         "calendar_access": _normalize_calendar_access(state.get("calendar_access")),
@@ -1611,15 +1818,24 @@ def save_onboarding(body: OnboardingIn) -> dict:
 
     hosted_account = accounting.hosted_account_summary()
     if mode == "own_api":
-        if not body.provider or not body.api_key:
-            raise HTTPException(400, "provider and api_key are required")
-        accounting.set_api_key(body.provider, body.api_key)
-        accounting.set_route("byo")
+        selected_provider = (body.provider or "").strip().lower()
+        model_provider = (accounting.provider_for_model(settings.model) or "").strip().lower()
+        if body.api_key:
+            provider = selected_provider or model_provider
+            if not provider:
+                raise HTTPException(400, "provider is required")
+            accounting.set_api_key(provider, body.api_key)
+            accounting.set_route("byo")
+        else:
+            provider = model_provider or selected_provider
+            if not _settings_api_key_for_provider(provider):
+                raise HTTPException(400, "api_key is required")
+            accounting.set_route("local")
     elif mode == "hosted_api":
         if not body.hosted_email:
             raise HTTPException(400, "hosted_email is required")
         region = _normalize_hosted_region(body.hosted_region)
-        base_url = (body.hosted_base_url or "http://localhost:8001").rstrip("/")
+        base_url = (body.hosted_base_url or "http://120.24.223.0").rstrip("/")
         
         # If api_key provided (new flow with login), save it and use proxy route
         if body.api_key:
@@ -1657,7 +1873,7 @@ def save_onboarding(body: OnboardingIn) -> dict:
             "persona": _normalize_persona(body.persona),
             "system_language": _normalize_language(body.system_language),
             "hosted_region": _normalize_hosted_region(body.hosted_region),
-            "hosted_base_url": (body.hosted_base_url or "http://localhost:8001").rstrip("/"),
+            "hosted_base_url": (body.hosted_base_url or "http://120.24.223.0").rstrip("/"),
             "permission_scope": _normalize_permission_scope(body.permission_scope),
             "terminal_access": _normalize_terminal_access(body.terminal_access),
             "calendar_access": _normalize_calendar_access(body.calendar_access)
@@ -1689,6 +1905,9 @@ def save_onboarding(body: OnboardingIn) -> dict:
 def chat(body: ChatIn) -> ChatOut:
     if not body.message.strip():
         raise HTTPException(400, "empty message")
+    state = accounting.get_setup_state()
+    if state.get("onboarding_mode"):
+        _restore_route_from_onboarding_mode(state["onboarding_mode"])
     sid = body.session_id or f"web-{uuid.uuid4().hex[:8]}"
     file_permission = _normalize_file_permission(body.file_permission)
     calendar_permission = _normalize_calendar_permission(body.calendar_permission)
@@ -1863,7 +2082,8 @@ def set_model(body: ModelIn) -> dict:
 @app.get("/api/language")
 def get_language() -> dict:
     state = accounting.get_setup_state()
-    return {"language": _normalize_language(state.get("system_language"))}
+    configured = "system_language" in state
+    return {"language": _normalize_language(state.get("system_language")), "configured": configured}
 
 
 @app.post("/api/language")
@@ -1905,6 +2125,71 @@ def detect_hosted_region(body: HostedRegionDetectIn) -> dict:
         "label": _hosted_region_label(region),
         "state": state,
     }
+
+
+@app.post("/api/hosted-login")
+def hosted_login(body: HostedLoginIn) -> dict:
+    base_url = (body.base_url or "http://120.24.223.0").strip().rstrip("/")
+    if not base_url.startswith(("https://", "http://")):
+        raise HTTPException(400, "invalid hosted API URL")
+
+    email = body.email.strip()
+    password = body.password
+    if not email or not password:
+        raise HTTPException(400, "email and password are required")
+
+    try:
+        with httpx.Client(timeout=20.0, trust_env=False) as client:
+            login_res = client.post(
+                f"{base_url}/auth/login",
+                data={"username": email, "password": password},
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            if login_res.status_code >= 400:
+                status_code = login_res.status_code if login_res.status_code in {400, 401, 403} else 502
+                raise HTTPException(status_code, _hosted_error(login_res, "登录失败，请检查邮箱和密码。"))
+
+            token = login_res.json().get("access_token")
+            if not token:
+                raise HTTPException(502, "登录成功但后台没有返回 access token")
+
+            auth_headers = {"Authorization": f"Bearer {token}"}
+            billing: dict = {}
+            billing_res = client.get(f"{base_url}/subscriptions/billing-status", headers=auth_headers)
+            if billing_res.is_success:
+                billing = billing_res.json()
+
+            key_res = client.post(
+                f"{base_url}/api-keys/",
+                headers={**auth_headers, "Content-Type": "application/json"},
+                json={"name": "Auctus Agent"},
+            )
+            if key_res.status_code >= 400:
+                raise HTTPException(502, _hosted_error(key_res, "无法创建 API Key"))
+            api_key = key_res.json().get("key")
+            if not api_key:
+                raise HTTPException(502, "API Key 创建成功但后台没有返回 key")
+
+            region = _normalize_hosted_region(body.region)
+            accounting.set_setup_state(
+                {
+                    "hosted_email": email,
+                    "hosted_region": region,
+                    "hosted_base_url": base_url,
+                }
+            )
+            return {
+                "token": token,
+                "email": email,
+                "api_key": api_key,
+                "base_url": base_url,
+                "region": region,
+                "billing": billing,
+            }
+    except HTTPException:
+        raise
+    except httpx.HTTPError as e:
+        raise HTTPException(502, f"无法连接 Auctus API：{e}") from e
 
 
 @app.get("/api/permission-scope")
@@ -2332,13 +2617,24 @@ def _normalize_persona(persona: Optional[str]) -> str:
 
 
 def _normalize_language(language: Optional[str]) -> str:
-    value = (language or "zh").strip().lower()
-    return value if value in {"zh", "en"} else "zh"
+    value = (language or "en").strip().lower()
+    return value if value in {"zh", "en"} else "en"
 
 
 def _normalize_hosted_region(region: Optional[str]) -> str:
     value = (region or "auto").strip().lower()
     return value if value in {"auto", "global", "cn"} else "auto"
+
+
+def _hosted_error(response: httpx.Response, fallback: str) -> str:
+    try:
+        data = response.json()
+    except ValueError:
+        return fallback
+    detail = data.get("detail") if isinstance(data, dict) else None
+    if isinstance(detail, str) and detail.strip():
+        return detail.strip()
+    return fallback
 
 
 def _detect_region_from_client(body: HostedRegionDetectIn) -> str:
@@ -2371,14 +2667,13 @@ def _hosted_region_label(region: Optional[str]) -> str:
 
 
 def _normalize_permission_scope(scope: Optional[str]) -> str:
-    value = (scope or "workspace").strip().lower()
-    return value if value in {"workspace", "full_computer"} else "workspace"
+    value = (scope or DEFAULT_PERMISSION_SCOPE).strip().lower()
+    return value if value in {"workspace", "full_computer"} else DEFAULT_PERMISSION_SCOPE
 
 
 def _normalize_terminal_access(access: Optional[str]) -> str:
-    # 默认关闭终端命令权限（用户需在设置里开启）
-    value = (access or "disabled").strip().lower()
-    return value if value in {"disabled", "enabled"} else "disabled"
+    value = (access or DEFAULT_TERMINAL_ACCESS).strip().lower()
+    return value if value in {"disabled", "enabled"} else DEFAULT_TERMINAL_ACCESS
 
 
 def _normalize_calendar_access(access: Optional[str]) -> str:
@@ -2427,7 +2722,7 @@ def _permission_scope_label(scope: Optional[str]) -> str:
         "workspace": "仅授权文件夹",
         "full_computer": "整台电脑",
     }
-    return labels.get(_normalize_permission_scope(scope), labels["workspace"])
+    return labels.get(_normalize_permission_scope(scope), labels[DEFAULT_PERMISSION_SCOPE])
 
 
 def _terminal_access_label(access: Optional[str]) -> str:
@@ -2435,7 +2730,7 @@ def _terminal_access_label(access: Optional[str]) -> str:
         "disabled": "关闭终端命令",
         "enabled": "允许终端命令",
     }
-    return labels.get(_normalize_terminal_access(access), labels["disabled"])
+    return labels.get(_normalize_terminal_access(access), labels[DEFAULT_TERMINAL_ACCESS])
 
 
 def _calendar_access_label(access: Optional[str]) -> str:
@@ -2557,12 +2852,18 @@ def _persona_label(persona: str) -> str:
 
 
 def _restore_route_from_onboarding_mode(mode: str) -> None:
+    normalized = (mode or "").strip().lower()
+    if normalized == "own_api":
+        provider = accounting.provider_for_model(settings.model) or ""
+        if _settings_api_key_for_provider(provider) and not accounting.get_api_key(provider):
+            accounting.set_route("local")
+            return
     route_by_mode = {
         "own_api": "byo",
         "hosted_api": _hosted_api_route(),
         "local_model": "local",
     }
-    route = route_by_mode.get((mode or "").strip().lower())
+    route = route_by_mode.get(normalized)
     if route:
         accounting.set_route(route)
 
@@ -2593,12 +2894,61 @@ def _is_default_workspace(path: Path) -> bool:
     return path.resolve() == default_workspace
 
 
+def _version_parts(version: str) -> tuple[int, ...]:
+    raw = (version or "").strip().lstrip("v")
+    parts: list[int] = []
+    for piece in raw.split("."):
+        match = re.match(r"(\d+)", piece)
+        if not match:
+            break
+        parts.append(int(match.group(1)))
+    return tuple(parts) if parts else (0,)
+
+
+def _is_newer_version(candidate: str, current: str) -> bool:
+    candidate_parts = _version_parts(candidate)
+    current_parts = _version_parts(current)
+    length = max(len(candidate_parts), len(current_parts))
+    candidate_parts = candidate_parts + (0,) * (length - len(candidate_parts))
+    current_parts = current_parts + (0,) * (length - len(current_parts))
+    return candidate_parts > current_parts
+
+
 def _hosted_api_route() -> str:
-    return "proxy" if settings.proxy_base_url else "local"
+    if settings.proxy_base_url:
+        return "proxy"
+    if accounting.get_api_key("auctus_hosted"):
+        return "proxy"
+    return "local"
+
+
+def _settings_api_key_for_provider(provider: str) -> Optional[str]:
+    provider = (provider or "").strip().lower()
+    if provider == "anthropic":
+        return settings.anthropic_api_key
+    if provider == "openai":
+        return settings.openai_api_key
+    if provider == "deepseek":
+        return settings.deepseek_api_key
+    if provider == "dashscope":
+        return settings.dashscope_api_key
+    return None
 
 
 def _friendly_runtime_error(message: str) -> str:
     language = _normalize_language(accounting.get_setup_state().get("system_language"))
+    lowered = message.lower()
+    if (
+        "deepseekexception" in lowered
+        or "nodename nor servname" in lowered
+        or "failed to connect" in lowered
+        or "connection error" in lowered
+        or "connectionerror" in lowered
+        or "timeout" in lowered
+    ):
+        if language == "en":
+            return "Cannot connect to DeepSeek right now. Check internet access, VPN/proxy, or try again in a minute."
+        return "当前无法连接 DeepSeek。请检查网络、代理/VPN，或稍后再试。"
     if "PROXY_BASE_URL" in message:
         if language == "en":
             return (
@@ -2613,7 +2963,7 @@ def _friendly_runtime_error(message: str) -> str:
         if language == "en":
             return "The current route is BYO Key, but no API key was found for this model provider. Save a key in Settings, or run Setup again."
         return "当前是 BYO Key 路由，但没有找到对应模型服务商的 API key。请在右侧保存 key，或重新运行首次设置。"
-    if "Authentication" in message or "401" in message or "Unauthorized" in message:
+    if "Authentication" in message or "401" in message or "Unauthorized" in message or "invalid api key" in lowered:
         if language == "en":
             return "Model API authentication failed. Check the API key for the current model, or switch to Own API and save a valid key."
         return "模型 API 认证失败。请检查当前模型对应的 API key，或切换到“自己的 API”后重新保存一个有效 key。"

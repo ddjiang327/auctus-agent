@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from typing import Any, Iterable, Optional
 
+import httpx
 import litellm
 
 from .config import settings
@@ -25,6 +26,9 @@ def chat_completion(
     返回的是 LiteLLM 标准化后的响应（OpenAI 格式），可以直接读
     `response["choices"][0]["message"]`。
     """
+    if accounting.current_route() == "proxy":
+        return _proxy_chat_completion(messages=messages, tools=tools, temperature=temperature)
+
     kwargs: dict[str, Any] = {
         "model": settings.model,
         "messages": messages,
@@ -44,6 +48,56 @@ def chat_completion(
         cost=data.get("response_cost"),
     )
     return data
+
+
+def _proxy_chat_completion(
+    messages: list[dict[str, Any]],
+    tools: Optional[list[dict[str, Any]]] = None,
+    temperature: float = 0.2,
+) -> dict[str, Any]:
+    endpoint, api_key = _proxy_endpoint_and_key()
+    body: dict[str, Any] = {
+        "model": _relay_model_id(settings.model),
+        "messages": messages,
+        "temperature": temperature,
+    }
+    if tools:
+        body["tools"] = tools
+        body["tool_choice"] = "auto"
+
+    response = httpx.post(
+        f"{endpoint}/chat/completions",
+        json=body,
+        headers={
+            "x-api-key": api_key,
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        timeout=120.0,
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(f"Proxy relay error: {response.status_code} - {response.text[:500]}")
+
+    data = response.json()
+    accounting.record_model_call(
+        model=data.get("model", settings.model),
+        usage=data.get("usage") or {},
+        cost=data.get("response_cost"),
+    )
+    return data
+
+
+def _proxy_endpoint_and_key() -> tuple[str, str]:
+    hosted = accounting.get_api_key_with_metadata("auctus_hosted")
+    if hosted:
+        base_url = hosted.get("metadata", {}).get("base_url", "http://localhost:8001")
+        return f"{base_url.rstrip('/')}/v1", hosted["api_key"]
+    if not settings.proxy_base_url:
+        raise RuntimeError("LLM route is proxy, but PROXY_BASE_URL is not configured and no auctus_hosted key found.")
+    api_key = settings.proxy_api_key or ""
+    if not api_key:
+        raise RuntimeError("LLM route is proxy, but PROXY_API_KEY is not configured.")
+    return settings.proxy_base_url.rstrip("/"), api_key
 
 
 def embed(texts: Iterable[str]) -> list[list[float]]:
@@ -66,7 +120,8 @@ def embed(texts: Iterable[str]) -> list[list[float]]:
 def _route_kwargs(model: str) -> dict[str, Any]:
     route = accounting.current_route()
     if route == "local":
-        return {}
+        api_key = _settings_api_key_for_model(model)
+        return {"api_key": api_key} if api_key else {}
     if route == "proxy":
         # Check if using auctus_hosted provider
         hosted = accounting.get_api_key_with_metadata("auctus_hosted")
@@ -89,3 +144,33 @@ def _route_kwargs(model: str) -> dict[str, Any]:
             raise RuntimeError(f"BYO route requires a saved {provider} API key.")
         return {"api_key": api_key}
     raise RuntimeError(f"Unsupported LLM route: {route}")
+
+
+def _completion_model(model: str) -> str:
+    if accounting.current_route() != "proxy":
+        return model
+    return f"openai/{_relay_model_id(model)}"
+
+
+def _relay_model_id(model: str) -> str:
+    value = (model or "").strip()
+    if value.startswith("deepseek/"):
+        return value.split("/", 1)[1]
+    if value.startswith("openai/"):
+        return value.split("/", 1)[1]
+    if value.startswith("anthropic/"):
+        return value.split("/", 1)[1]
+    return value
+
+
+def _settings_api_key_for_model(model: str) -> Optional[str]:
+    provider = accounting.provider_for_model(model)
+    if provider == "anthropic":
+        return settings.anthropic_api_key
+    if provider == "openai":
+        return settings.openai_api_key
+    if provider == "deepseek":
+        return settings.deepseek_api_key
+    if provider == "dashscope":
+        return settings.dashscope_api_key
+    return None

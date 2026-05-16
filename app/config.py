@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     max_tool_iterations: int = 8
     context_token_budget: int = 8000  # 超过就触发滚动摘要
     update_check_url: Optional[str] = None
+    agent_download_url: str = "https://github.com/ddjiang327/auctus-agent/releases/latest"
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

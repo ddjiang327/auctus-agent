@@ -20,7 +20,7 @@
 Mac:
 
 ```bash
-cd secretary
+cd auctus-agent
 scripts/install_mac.sh
 scripts/start_mac.sh
 ```
@@ -28,7 +28,7 @@ scripts/start_mac.sh
 Windows PowerShell:
 
 ```powershell
-cd secretary
+cd auctus-agent
 powershell -ExecutionPolicy Bypass -File .\scripts\install_windows.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\start_windows.ps1
 ```
@@ -112,7 +112,7 @@ python -m app.telegram_bot
 ## 目录结构
 
 ```text
-secretary/
+auctus-agent/
 ├── app/                 # FastAPI、Agent、工具、记忆、Relay
 │   ├── evolve/          # 自我学习闭环（skills, eval, gepa）
 │   ├── tools.py         # 工具实现

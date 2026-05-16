@@ -17,7 +17,7 @@ import time
 from datetime import date
 from pathlib import Path
 
-# 切换到 secretary/ 目录，确保相对路径（data/、outputs/、inputs/）正确
+# 切换到项目根目录，确保相对路径（data/、outputs/、inputs/）正确
 os.chdir(Path(__file__).parent)
 
 from app.agent import chat  # noqa: E402（chdir 必须在 import 之前）
@@ -637,6 +637,39 @@ def _evolve(args: argparse.Namespace) -> None:
         print(f"  结果保存：{result['result_path']}")
         return
 
+    if args.action == "gepa-run":
+        from app.evolve import gepa as gepa_mod
+        if not args.id:
+            print("请提供目标 ID：agent.py evolve gepa-run <skill_id> --name <eval_set>", file=sys.stderr)
+            sys.exit(1)
+        result = gepa_mod.cli_gepa_run(
+            target_type=args.target or "skill",
+            target_id=args.id,
+            eval_set=args.name or "weekly_eval",
+        )
+        if not result.get("ok"):
+            print(f"失败：{result.get('error')}", file=sys.stderr)
+            sys.exit(1)
+        print(f"GEPA 实验完成：{result['exp_id']}")
+        print(f"  获胜变体：{result['winner_id']}")
+        print(f"  成功率：{result['success_rate']*100:.1f}% (基线 {result['baseline_rate']*100:.1f}%)")
+        print(f"  测试变体数：{result['variants_tested']}")
+        print(f"  报告：{result['report_path']}")
+        return
+
+    if args.action == "gepa-list":
+        from app.evolve import gepa as gepa_mod
+        experiments = gepa_mod.cli_list_experiments()
+        if not experiments:
+            print("暂无 GEPA 实验。")
+            return
+        for exp in experiments:
+            status = exp.get("status", "unknown")
+            print(f"[{exp['exp_id'][:12]}…] [{status}] {exp['name']} ({exp.get('target_type', '')})")
+            if exp.get("winner_id"):
+                print(f"  winner: {exp['winner_id']}")
+        return
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="agent", description="Auctus Local Agent CLI")
@@ -702,6 +735,7 @@ def main() -> None:
         "scan", "list", "apply", "reject", "disable", "rollback",
         "skill-scan", "skill-list", "skill-apply", "skill-reject", "skill-disable", "skill-rollback",
         "eval-build", "eval-run",
+        "gepa-run", "gepa-list",
     ])
     evolve_p.add_argument("id", nargs="?", help="学习候选 ID（apply/reject/disable/rollback 时必填）")
     evolve_p.add_argument("--messages", type=int, default=120, help="scan 时读取最近 N 条消息")
@@ -710,6 +744,7 @@ def main() -> None:
     evolve_p.add_argument("--limit", type=int, default=50)
     evolve_p.add_argument("--name", help="eval-build/eval-run 时指定评估集名称")
     evolve_p.add_argument("--variant", help="eval-run 时指定变体名称（如 baseline, skill_v2）")
+    evolve_p.add_argument("--target", choices=["skill", "prompt"], default="skill", help="gepa-run 优化目标类型")
 
     cron_p = sub.add_parser("cron", help="管理本机 cron job（生成脚本 + 导出/写入 crontab）")
     cron_p.add_argument(

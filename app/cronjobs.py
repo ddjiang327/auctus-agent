@@ -181,13 +181,20 @@ def _replace_block(existing: str, block: str) -> str:
 
 def _wrap_script(body: str) -> str:
     """Wrap user-provided body with consistent env + venv loading."""
-    root = Path(__file__).resolve().parent.parent  # secretary/
-    # cron 环境变量很少：需要显式载入 .env；并优先使用项目内 .venv
+    root = Path(__file__).resolve().parent.parent  # auctus-agent/
+    log_dir = root / "data" / "cron" / "logs"
     return f"""#!/usr/bin/env bash
 set -euo pipefail
 
 ROOT="{root}"
 cd "$ROOT"
+
+# Redirect all output to data/cron/logs/, away from user workspace
+LOG_DIR="{log_dir}"
+mkdir -p "$LOG_DIR"
+SCRIPT_NAME="$(basename "$0" .sh)"
+exec >> "$LOG_DIR/$SCRIPT_NAME.log" 2>&1
+echo "--- $(date '+%Y-%m-%d %H:%M:%S') ---"
 
 # Load .env if present (local-only)
 if [ -f ".env" ]; then

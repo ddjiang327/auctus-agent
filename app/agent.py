@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime
 from pathlib import Path
 
 from .config import settings
@@ -35,6 +36,7 @@ def _build_messages(session_id: str, user_text: str) -> list[dict]:
     history = _sanitize_tool_history(history)
 
     msgs: list[dict] = [{"role": "system", "content": _system_prompt()}]
+    msgs.append({"role": "system", "content": _datetime_context()})
     msgs.append({"role": "system", "content": _workspace_context()})
     msgs.append({"role": "system", "content": _language_context()})
     msgs.append({"role": "system", "content": _persona_context()})
@@ -136,6 +138,15 @@ def _chat_with_tools(session_id: str, user_text: str, msgs: list[dict], files_pr
             }
             msgs.append(tool_msg)
             memory.append_message(session_id, tool_msg)
+            if isinstance(result, dict) and result.get("error"):
+                msgs.append({
+                    "role": "system",
+                    "content": (
+                        "[工具执行失败]\n"
+                        f"工具 {name} 没有完成任务，错误是：{result.get('error')}\n"
+                        "最终回复必须明确说明未执行成功，不要声称已经完成。"
+                    ),
+                })
 
     # 超出迭代上限
     fallback = _tool_loop_fallback(user_text, last_tool_results)
@@ -190,10 +201,19 @@ def _safe_task_id(task_id: str) -> str:
     return safe[:80] or "task"
 
 
+def _datetime_context() -> str:
+    now = datetime.now()
+    return (
+        "[当前时间]\n"
+        f"- 今天是 {now.strftime('%Y年%m月%d日')}，{now.strftime('%A')}，当前时间 {now.strftime('%H:%M')}。\n"
+        "- 生成文件名、报告标题、日期字段时，必须使用以上实际日期，不要凭记忆推断。\n"
+    )
+
+
 def _workspace_context() -> str:
     workspace = settings.workspace_dir.resolve()
     state = accounting.get_setup_state()
-    scope = state.get("permission_scope", "workspace")
+    scope = state.get("permission_scope", "full_computer")
     terminal_access = state.get("terminal_access", "enabled")
     if scope == "full_computer":
         scope_text = (
@@ -230,7 +250,7 @@ def _persona_context() -> str:
 
 def _language_context() -> str:
     state = accounting.get_setup_state()
-    language = (state.get("system_language") or "zh").strip().lower()
+    language = (state.get("system_language") or "en").strip().lower()
     if language == "en":
         return (
             "[System Language]\n"

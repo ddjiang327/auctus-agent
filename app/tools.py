@@ -25,6 +25,7 @@ from jinja2 import Template
 
 from .config import settings
 from . import accounting
+from . import cronjobs
 from . import evolution
 from . import memory
 from . import llm
@@ -59,6 +60,8 @@ _CHAT_AUTHORIZED_PATHS: ContextVar[tuple[Path, ...]] = ContextVar("chat_authoriz
 _TERMINAL_ACCESS_OVERRIDE: ContextVar[Optional[str]] = ContextVar("terminal_access_override", default=None)
 _PERMISSION_SCOPE_OVERRIDE: ContextVar[Optional[str]] = ContextVar("permission_scope_override", default=None)
 _MEMORY_TYPES = {"preference", "project", "rule", "temporary"}
+DEFAULT_PERMISSION_SCOPE = "full_computer"
+DEFAULT_TERMINAL_ACCESS = "enabled"
 _REMEMBER_KEYWORDS = ("记住", "保存", "保存到记忆", "加入记忆", "remember", "save this", "save this memory")
 _FORGET_KEYWORDS = ("删除记忆", "删掉记忆", "忘记", "forget", "delete memory", "remove memory")
 _TERMINAL_KEYWORDS = (
@@ -72,7 +75,7 @@ _TERMINAL_KEYWORDS = (
     "运行",
     "打开",
     "启动",
-    # 文件级操作也算“明确授权”（用于 rm/mv 等）
+    # 文件级操作也算"明确授权"（用于 rm/mv 等）
     "删除",
     "删掉",
     "移到废纸篓",
@@ -85,6 +88,7 @@ _TERMINAL_KEYWORDS = (
     "rm",
     "mv",
 )
+_AFFIRMATIVE_CONFIRMATIONS = ("是", "是的", "确认", "确认执行", "可以", "好", "好的", "yes", "y", "ok")
 _BLOCKED_TERMINAL_PATTERNS = (
     r"\brm\s+-rf\s+/",
     r"\bsudo\b",
@@ -239,9 +243,9 @@ def _permission_scope() -> str:
     if override:
         return "full_computer" if override == "full_computer" else "workspace"
     try:
-        scope = accounting.get_setup_state().get("permission_scope", "workspace")
+        scope = accounting.get_setup_state().get("permission_scope", DEFAULT_PERMISSION_SCOPE)
     except Exception:
-        scope = "workspace"
+        scope = DEFAULT_PERMISSION_SCOPE
     return "full_computer" if scope == "full_computer" else "workspace"
 
 
@@ -250,9 +254,9 @@ def _terminal_access() -> str:
     if override:
         return "enabled" if override == "enabled" else "disabled"
     try:
-        access = accounting.get_setup_state().get("terminal_access", "disabled")
+        access = accounting.get_setup_state().get("terminal_access", DEFAULT_TERMINAL_ACCESS)
     except Exception:
-        access = "disabled"
+        access = DEFAULT_TERMINAL_ACCESS
     return "enabled" if access == "enabled" else "disabled"
 
 
@@ -620,10 +624,117 @@ def get_email_thread(account_id: str, uid: str) -> dict:
         return {"error": f"{type(e).__name__}: {e}"}
 
 
+def configure_email_account(email_address: str, password: str, provider: str = "") -> dict:
+    """通过对话配置邮件账户。自动识别常见服务商（gmail/outlook/icloud/yahoo/qq/163）的 IMAP/SMTP 设置，测试连接后保存。"""
+    from . import email_client
+    email_address = email_address.strip()
+    provider = provider.strip().lower()
+
+    # Auto-detect provider from email domain if not specified
+    if not provider:
+        domain = email_address.split("@")[-1].lower() if "@" in email_address else ""
+        domain_map = {
+            "gmail.com": "gmail",
+            "googlemail.com": "gmail",
+            "outlook.com": "outlook", "hotmail.com": "outlook",
+            "live.com": "outlook", "msn.com": "outlook",
+            "icloud.com": "icloud", "me.com": "icloud", "mac.com": "icloud",
+            "yahoo.com": "yahoo", "yahoo.com.au": "yahoo",
+            "qq.com": "qq",
+            "163.com": "163", "126.com": "163",
+        }
+        provider = domain_map.get(domain, "")
+
+    presets = accounting.EMAIL_PROVIDERS.get(provider, {})
+    if not presets:
+        return {
+            "error": f"未能识别服务商。请手动提供 imap_host 和 smtp_host。已支持：{list(accounting.EMAIL_PROVIDERS.keys())}"
+        }
+
+    account_draft = {
+        **presets,
+        "email_address": email_address,
+        "username": email_address,
+        "password": password,
+    }
+    test = email_client.test_connection(account_draft)
+    if not test.get("ok"):
+        return {"error": f"连接测试失败：{test.get('error')}。请确认密码（Gmail/QQ 等需使用应用专用密码）。"}
+
+    saved = accounting.save_email_account(
+        email_address=email_address,
+        username=email_address,
+        password=password,
+        imap_host=presets["imap_host"],
+        imap_port=presets.get("imap_port", 993),
+        imap_ssl=presets.get("imap_ssl", True),
+        smtp_host=presets["smtp_host"],
+        smtp_port=presets.get("smtp_port", 465),
+        smtp_ssl=presets.get("smtp_ssl", True),
+        label=f"{provider.upper()} - {email_address}",
+    )
+    return {
+        "ok": True,
+        "account_id": saved["id"],
+        "email_address": email_address,
+        "provider": provider,
+        "label": saved["label"],
+        "message": f"邮件账户已配置成功，account_id: {saved['id']}",
+    }
+
+
+def list_email_accounts_tool() -> dict:
+    """列出所有已配置的邮件账户（不含密码）。"""
+    accounts = accounting.list_email_accounts()
+    return {"accounts": accounts, "count": len(accounts)}
+
+
+def send_email_tool(account_id: str, to: str, subject: str, body: str, cc: str = "") -> dict:
+    """通过已配置的邮件账户发送邮件。"""
+    from . import email_client
+    account = accounting.get_email_account(account_id)
+    if not account:
+        return {"error": f"email account not found: {account_id}"}
+    try:
+        return email_client.send_email(account, to=to, subject=subject, body=body, cc=cc)
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}"}
+
+
+def delete_email_tool(account_id: str, uid: str) -> dict:
+    """永久删除收件箱中的一封邮件（不可恢复，请谨慎使用）。uid 来自 list_inbox 或 search_emails。"""
+    from . import email_client
+    account = accounting.get_email_account(account_id)
+    if not account:
+        return {"error": f"email account not found: {account_id}"}
+    try:
+        return email_client.delete_email(account, uid=uid)
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}"}
+
+
+def archive_email_tool(account_id: str, uid: str, archive_folder: str = "") -> dict:
+    """将一封邮件从收件箱移至归档文件夹（Gmail 对应"所有邮件"，其他服务商对应 Archive）。"""
+    from . import email_client
+    account = accounting.get_email_account(account_id)
+    if not account:
+        return {"error": f"email account not found: {account_id}"}
+    try:
+        return email_client.archive_email(account, uid=uid, archive_folder=archive_folder)
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}"}
+
+
 # ---- 记忆 ----
 
-_MEMORY_CANDIDATE_PROMPT = """请从以下文本中提取值得长期记住的信息（用户偏好、项目背景、工作规则、重要决定）。
+_MEMORY_CANDIDATE_PROMPT = """请从以下文本中提取值得长期记住的信息（用户身份资料、长期偏好、项目背景、工作规则、重要决定）。
 不要提取临时信息或已知常识。
+
+记忆取舍规则：
+- 应该保留：用户姓名、年龄、职业、长期居住城市/区域、长期偏好、长期项目背景、明确要求你以后遵守的规则。
+- 不应该保留：当前工作目录、桌面上有哪些文件、某个文件刚被创建/删除、一次性的路径/命令/操作记录、临时调试状态。
+- 如果临时信息确实有用，只能标记为 temporary 且 importance <= 2；不要把它当作 preference/project/rule。
+- 对同一主题的新事实，提取为一条更准确的新事实，不要同时保留旧事实和新事实。
 
 文本：
 {text}
@@ -632,6 +743,33 @@ _MEMORY_CANDIDATE_PROMPT = """请从以下文本中提取值得长期记住的�
 {{"key": "短标题", "value": "事实内容", "type": "preference|project|rule|temporary", "importance": 1-5}}
 
 只输出 JSON，不要其他内容。"""
+
+_TEMPORARY_MEMORY_PATTERNS = (
+    "工作目录",
+    "当前目录",
+    "桌面上",
+    "desktop",
+    "刚删",
+    "刚删除",
+    "刚创建",
+    "刚改",
+    "文件夹",
+    "localstorage",
+    "ledger_records",
+)
+
+_IMPORTANT_PROFILE_PATTERNS = (
+    "姓名",
+    "名字",
+    "年龄",
+    "职业",
+    "程序员",
+    "住在",
+    "居住",
+    "城市",
+    "偏好",
+    "希望",
+)
 
 
 def extract_memory_candidates(text: str) -> dict:
@@ -656,19 +794,28 @@ def extract_memory_candidates(text: str) -> dict:
     for c in candidates_raw:
         if not isinstance(c, dict):
             continue
+        key = str(c.get("key", "untitled")).strip() or "untitled"
+        value = str(c.get("value", "")).strip()
+        if not value:
+            continue
         memory_type = _normalize_memory_type(c.get("type", "project"))
         importance = _normalize_importance(c.get("importance", 3))
+        decision = _memory_candidate_decision(key, value, memory_type, importance)
+        if not decision["store"]:
+            continue
+        memory_type = decision["type"]
+        importance = decision["importance"]
         fact_id = memory.store_candidate(
-            key=c.get("key", "untitled"),
-            value=c.get("value", ""),
+            key=key,
+            value=value,
             tags=[],
             type=memory_type,
             importance=importance,
         )
         stored.append({
             "id": fact_id,
-            "key": c.get("key"),
-            "value": c.get("value"),
+            "key": key,
+            "value": value,
             "type": memory_type,
             "importance": importance,
         })
@@ -677,6 +824,21 @@ def extract_memory_candidates(text: str) -> dict:
         "count": len(stored),
         "note": "候选记忆已暂存，请用 confirm_memory 确认或 forget_memory 删除",
     }
+
+
+def _memory_candidate_decision(key: str, value: str, memory_type: str, importance: int) -> dict:
+    """Deterministic memory hygiene guard after LLM extraction."""
+    text = f"{key} {value}".lower()
+    has_temporary_signal = any(pattern.lower() in text for pattern in _TEMPORARY_MEMORY_PATTERNS)
+    has_profile_signal = any(pattern.lower() in text for pattern in _IMPORTANT_PROFILE_PATTERNS)
+
+    if has_temporary_signal and not has_profile_signal:
+        return {"store": False, "type": "temporary", "importance": min(importance, 2)}
+    if memory_type == "temporary" and importance <= 2 and not has_profile_signal:
+        return {"store": False, "type": "temporary", "importance": importance}
+    if has_profile_signal:
+        return {"store": True, "type": "preference" if memory_type == "temporary" else memory_type, "importance": max(importance, 4)}
+    return {"store": True, "type": memory_type, "importance": importance}
 
 
 def remember(
@@ -715,6 +877,28 @@ def confirm_memory(memory_id: str) -> dict:
 def forget_memory(memory_id: str) -> dict:
     """删除一条记忆（按 ID）。"""
     return memory.forget(memory_id)
+
+
+def create_cron_job(name: str, schedule: str, task: str, input_file: str = "") -> dict:
+    """创建一个定时任务，生成脚本并注册到 Auctus Agent 的 cron 管理器。"""
+    if input_file:
+        script_body = cronjobs.template_agent_run(input_rel=input_file, task=task)
+    else:
+        script_body = f'echo "Running: {task}"\n.venv/bin/python agent.py run --task "{task}"\n'
+    job = cronjobs.add_job(name=name, schedule=schedule, script_body=script_body, description=task)
+    snippet = cronjobs.export_crontab_snippet()
+    return {
+        "ok": True,
+        "job": job,
+        "crontab_snippet": snippet,
+        "note": "定时任务已创建。运行 `python agent.py cron apply` 可将其写入系统 crontab 自动生效。",
+    }
+
+
+def list_cron_jobs() -> dict:
+    """列出所有已注册的定时任务。"""
+    jobs = cronjobs.list_jobs()
+    return {"jobs": jobs, "count": len(jobs)}
 
 
 def list_outputs() -> dict:
@@ -820,6 +1004,177 @@ def _html_to_text(html: str) -> str:
     return text.strip()
 
 
+# ---- 监控工具 ----
+
+# 物流单号格式识别规则
+_CARRIER_PATTERNS: list[tuple[str, str]] = [
+    ("UPS",            r"\b1Z[0-9A-Z]{16}\b"),
+    ("FedEx",          r"\b\d{12}\b|\b\d{15}\b|\b\d{20}\b"),
+    ("USPS",           r"\b(94|93|92|94|95)\d{18,20}\b"),
+    ("DHL",            r"\b\d{10}\b"),
+    ("Australia Post", r"\b[A-Z]{2}\d{8}AU\b"),
+    ("顺丰",           r"\bSF\d{12}\b"),
+    ("中通",           r"\b7[3-9]\d{9}\b"),
+    ("圆通",           r"\bYT\d{16}\b"),
+    ("韵达",           r"\bYD\d{16}\b"),
+    ("EMS",            r"\bE[A-Z]\d{9}CN\b"),
+]
+
+
+def _detect_carrier(number: str) -> str:
+    for carrier, pattern in _CARRIER_PATTERNS:
+        if re.search(pattern, number, re.I):
+            return carrier
+    return "unknown"
+
+
+def track_logistics(tracking_number: str, carrier: str = "") -> dict:
+    """从快递单号查询物流状态。自动识别快递公司（UPS/FedEx/顺丰/EMS/澳邮等）并搜索最新状态。carrier 可选，留空则自动识别。"""
+    number = tracking_number.strip()
+    if not number:
+        return {"error": "tracking number is empty"}
+    detected = carrier.strip() or _detect_carrier(number)
+    query = f"track package {number} {detected}" if detected != "unknown" else f"track package {number}"
+    try:
+        result = search_web(query, max_results=3)
+        return {
+            "tracking_number": number,
+            "detected_carrier": detected,
+            "search_results": result.get("results", []),
+            "note": "以上为搜索结果，如需精准查询请访问快递公司官网或配置官方 API Key。",
+        }
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}"}
+
+
+def fetch_element(url: str, selector: str, attribute: str = "") -> dict:
+    """用 CSS selector 精准抓取网页中特定元素的文本或属性值。适合价格监控、库存状态、发布日期等定向提取。selector 为标准 CSS 选择器（如 '.price'、'#stock'）。"""
+    from bs4 import BeautifulSoup
+    import requests as _req
+
+    url = url.strip()
+    selector = selector.strip()
+    if not url or not selector:
+        return {"error": "url and selector are required"}
+
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; AuctusAgent/0.1; personal use)"}
+    try:
+        resp = _req.get(url, headers=headers, timeout=15)
+        resp.raise_for_status()
+    except Exception as e:
+        return {"ok": False, "error": f"fetch failed: {e}"}
+
+    soup = BeautifulSoup(resp.text, "lxml")
+    elements = soup.select(selector)
+    if not elements:
+        return {"ok": False, "url": url, "selector": selector, "error": "no elements matched selector"}
+
+    results = []
+    for el in elements[:10]:
+        val = el.get(attribute, "") if attribute else el.get_text(strip=True)
+        results.append(val)
+
+    return {
+        "ok": True,
+        "url": url,
+        "selector": selector,
+        "attribute": attribute or "text",
+        "matches": results,
+        "count": len(results),
+    }
+
+
+# ---- IoT 网关控制 ----
+
+_IOT_CONFIG_PATH = Path(__file__).parent.parent / "data" / "iot_gateways.json"
+
+
+def configure_iot_gateway(
+    gateway_type: str,
+    base_url: str,
+    api_token: str,
+    confirmed: bool = False,
+) -> dict:
+    """保存 IoT 网关配置（URL + Token）。支持 Home Assistant、Tuya 等主流平台。"""
+    if not confirmed:
+        return {"error": "need confirmed=true to save gateway credentials"}
+    base_url = base_url.rstrip("/").strip()
+    if not base_url or not api_token:
+        return {"error": "base_url and api_token are required"}
+    gateway_type = (gateway_type or "generic").lower().strip()
+    encrypted = accounting._encrypt_secret(api_token)
+    hint = f"...{api_token[-4:]}" if len(api_token) >= 4 else "****"
+    _IOT_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    existing: dict = {}
+    if _IOT_CONFIG_PATH.exists():
+        try:
+            existing = json.loads(_IOT_CONFIG_PATH.read_text())
+        except Exception:
+            existing = {}
+    existing[gateway_type] = {
+        "type": gateway_type,
+        "base_url": base_url,
+        "encrypted_token": encrypted,
+        "token_hint": hint,
+        "updated_at": datetime.now().isoformat(),
+    }
+    _IOT_CONFIG_PATH.write_text(json.dumps(existing, ensure_ascii=False, indent=2))
+    return {
+        "ok": True,
+        "gateway_type": gateway_type,
+        "base_url": base_url,
+        "token_hint": hint,
+        "message": f"{gateway_type} 网关已配置，token 已加密保存",
+    }
+
+
+def call_iot_gateway(
+    endpoint: str,
+    method: str = "GET",
+    payload: Optional[dict] = None,
+    gateway_type: str = "home_assistant",
+    confirmed: bool = False,
+) -> dict:
+    """调用已配置的 IoT 网关 REST API（Home Assistant /api/...、Tuya 等）。需先用 configure_iot_gateway 完成配置。"""
+    import requests as _req
+
+    if not confirmed:
+        return {"error": "need confirmed=true to call IoT gateway"}
+    if not _IOT_CONFIG_PATH.exists():
+        return {"error": "没有已配置的 IoT 网关。请先调用 configure_iot_gateway 设置网关 URL 和 Token。"}
+    try:
+        configs: dict = json.loads(_IOT_CONFIG_PATH.read_text())
+    except Exception:
+        return {"error": "IoT 配置文件损坏，请重新配置"}
+    gw_type = (gateway_type or "home_assistant").lower().strip()
+    cfg = configs.get(gw_type)
+    if not cfg:
+        return {"error": f"未找到 '{gw_type}' 网关配置。已配置: {list(configs.keys())}"}
+    token = accounting._decrypt_secret(cfg["encrypted_token"])
+    url = cfg["base_url"] + "/" + endpoint.lstrip("/")
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    method = (method or "GET").upper()
+    try:
+        if method == "GET":
+            resp = _req.get(url, headers=headers, timeout=15)
+        elif method == "POST":
+            resp = _req.post(url, headers=headers, json=payload or {}, timeout=15)
+        elif method == "PUT":
+            resp = _req.put(url, headers=headers, json=payload or {}, timeout=15)
+        elif method == "DELETE":
+            resp = _req.delete(url, headers=headers, timeout=15)
+        else:
+            return {"error": f"不支持的 HTTP 方法: {method}"}
+        status = resp.status_code
+        try:
+            body = resp.json()
+        except Exception:
+            body = resp.text
+        return {"ok": status < 300, "status_code": status, "url": url, "method": method, "response": body}
+    except Exception as e:
+        return {"ok": False, "error": f"网关请求失败: {e}", "url": url}
+
+
 # ---------- 工具安全与日志 ----------
 
 _RISK = {
@@ -833,6 +1188,11 @@ _RISK = {
     "list_inbox": "low",
     "search_emails": "low",
     "get_email_thread": "low",
+    "configure_email_account": "high",
+    "list_email_accounts_tool": "low",
+    "send_email_tool": "high",
+    "delete_email_tool": "high",
+    "archive_email_tool": "medium",
     "make_markdown_report": "low",
     "make_spreadsheet": "low",
     "make_webpage": "medium",
@@ -842,6 +1202,10 @@ _RISK = {
     "recall": "low",
     "list_outputs": "low",
     "fetch_webpage": "low",
+    "fetch_element": "low",
+    "track_logistics": "low",
+    "configure_iot_gateway": "high",
+    "call_iot_gateway": "high",
     "search_web": "low",
     "list_memories": "low",
     "confirm_memory": "medium",
@@ -881,6 +1245,42 @@ def _has_explicit_user_approval(name: str, user_input: str) -> bool:
     if name == "run_terminal_command":
         return any(k.lower() in text for k in _TERMINAL_KEYWORDS)
     return False
+
+
+def _can_accept_implicit_soft_trash_confirmation(name: str, args: dict, user_input: str) -> bool:
+    """Allow UI-confirmed safe file moves even if the model omits confirmed:true."""
+    if name != "run_terminal_command":
+        return False
+    if not (_has_explicit_user_approval(name, user_input) or _is_affirmative_confirmation(user_input)):
+        return False
+    command = str(args.get("command") or "").strip()
+    return _is_soft_trash_command(command) or _is_restore_from_trash_command(command)
+
+
+def _is_affirmative_confirmation(user_input: str) -> bool:
+    return (user_input or "").strip().lower() in _AFFIRMATIVE_CONFIRMATIONS
+
+
+def _is_soft_trash_command(command: str) -> bool:
+    lowered = command.strip().lower()
+    if re.search(r"(^|[\s;&|])rm(\s|$)", lowered):
+        return False
+    if ".trash" in lowered and re.search(r"(^|[\s;&|])mv\s+", lowered):
+        return True
+    if "osascript" in lowered and "trash" in lowered:
+        return True
+    return False
+
+
+def _is_restore_from_trash_command(command: str) -> bool:
+    lowered = command.strip().lower()
+    if re.search(r"(^|[\s;&|])rm(\s|$)", lowered):
+        return False
+    has_trash_source = ".trash" in lowered or "first item of trash" in lowered or " of trash " in lowered
+    has_desktop_target = "/desktop" in lowered or "~/desktop" in lowered or "folder \"desktop\"" in lowered
+    if not (has_trash_source and has_desktop_target):
+        return False
+    return bool(re.search(r"(^|[\s;&|])mv\s+", lowered) or "osascript" in lowered)
 
 
 def _write_log(
@@ -972,14 +1372,14 @@ TOOL_SCHEMAS: list[dict] = [
         "type": "function",
         "function": {
             "name": "run_terminal_command",
-            "description": "执行本机终端命令。只有 Settings 已启用终端权限、且用户当前请求明确要求执行终端/命令时才能使用。默认工作目录为授权 workspace；若文件权限为整台电脑，可指定其他工作目录。会拦截明显危险命令。",
+            "description": "执行本机终端命令。只有 Settings 已启用终端权限时才能使用。默认工作目录为授权 workspace；若文件权限为整台电脑，可指定其他工作目录。会拦截明显危险命令。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "command": {"type": "string", "description": "要执行的 shell 命令"},
                     "working_directory": {"type": "string", "description": "命令执行目录，可选"},
                     "timeout_seconds": {"type": "integer", "description": "超时时间，默认 30 秒，最大 120 秒"},
-                    "confirmed": {"type": "boolean", "description": "必须为 true，表示用户当前请求明确要求执行该命令"},
+                    "confirmed": {"type": "boolean", "description": "当你理解用户意图是执行此操作时，设为 true。不限语言或措辞，只要你判断用户确实想执行该命令即可。"},
                 },
                 "required": ["command"],
             },
@@ -1243,6 +1643,83 @@ TOOL_SCHEMAS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "configure_email_account",
+            "description": "通过对话配置邮件账户。自动识别 Gmail/Outlook/iCloud/Yahoo/QQ/163 的服务器设置，测试连接后加密保存。首次使用邮件功能时调用此工具。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "email_address": {"type": "string", "description": "邮箱地址，例如 user@gmail.com"},
+                    "password": {"type": "string", "description": "邮箱密码或应用专用密码（Gmail/QQ 等需在账户设置中生成）"},
+                    "provider": {"type": "string", "description": "服务商名称（可选，留空则自动从邮箱域名识别）：gmail / outlook / icloud / yahoo / qq / 163"},
+                    "confirmed": {"type": "boolean", "description": "用户已确认提供凭据并同意保存，必须为 true 才能执行"},
+                },
+                "required": ["email_address", "password", "confirmed"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_email_accounts_tool",
+            "description": "列出所有已配置的邮件账户及其 account_id，不含密码。",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "send_email_tool",
+            "description": "通过已配置的邮件账户发送邮件。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "account_id": {"type": "string", "description": "发件账户 ID（来自 list_email_accounts_tool）"},
+                    "to": {"type": "string", "description": "收件人邮箱，多个用逗号分隔"},
+                    "subject": {"type": "string", "description": "邮件主题"},
+                    "body": {"type": "string", "description": "邮件正文（纯文本）"},
+                    "cc": {"type": "string", "description": "抄送邮箱，可选，多个用逗号分隔"},
+                    "confirmed": {"type": "boolean", "description": "用户已确认发送此邮件，必须为 true"},
+                },
+                "required": ["account_id", "to", "subject", "body", "confirmed"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_email_tool",
+            "description": "永久删除收件箱中的一封邮件（不可恢复）。uid 来自 list_inbox 或 search_emails。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "account_id": {"type": "string", "description": "邮件账户 ID"},
+                    "uid": {"type": "string", "description": "要删除的邮件 UID"},
+                    "confirmed": {"type": "boolean", "description": "用户已确认永久删除此邮件，必须为 true"},
+                },
+                "required": ["account_id", "uid", "confirmed"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "archive_email_tool",
+            "description": "将一封邮件从收件箱移至归档（Gmail 为'所有邮件'，其他服务商为 Archive 文件夹）。uid 来自 list_inbox 或 search_emails。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "account_id": {"type": "string", "description": "邮件账户 ID"},
+                    "uid": {"type": "string", "description": "要归档的邮件 UID"},
+                    "archive_folder": {"type": "string", "description": "归档文件夹名（可选，留空则自动选择）"},
+                    "confirmed": {"type": "boolean", "description": "用户已确认归档此邮件，必须为 true"},
+                },
+                "required": ["account_id", "uid", "confirmed"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "list_outputs",
             "description": "列出最近生成的输出文件（表格/网页/报告）。",
             "parameters": {"type": "object", "properties": {}},
@@ -1275,6 +1752,37 @@ TOOL_SCHEMAS: list[dict] = [
                     "max_results": {"type": "integer", "description": "最多返回多少条结果，默认 5，最大 10"},
                 },
                 "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "track_logistics",
+            "description": "查询快递/物流单号的最新状态。自动识别 UPS/FedEx/顺丰/EMS/澳邮/中通/圆通/韵达等常见快递公司。返回搜索结果供 Agent 解析状态。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tracking_number": {"type": "string", "description": "物流单号"},
+                    "carrier": {"type": "string", "description": "快递公司名称（可选，留空则自动从单号格式识别）"},
+                },
+                "required": ["tracking_number"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "fetch_element",
+            "description": "用 CSS selector 精准抓取网页中特定元素的文本或属性值。适合价格监控、库存状态检测、发布日期追踪等场景。注意：对需要 JS 渲染或登录的页面效果有限。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "目标网页 URL"},
+                    "selector": {"type": "string", "description": "CSS 选择器，例如 '.price'、'#stock-status'、'span.availability'"},
+                    "attribute": {"type": "string", "description": "提取元素的哪个属性（可选，默认提取文本内容）。例如 'href'、'data-price'"},
+                },
+                "required": ["url", "selector"],
             },
         },
     },
@@ -1328,6 +1836,78 @@ TOOL_SCHEMAS: list[dict] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_cron_job",
+            "description": "创建定时任务。生成可执行脚本并注册到 Auctus Agent cron 管理器。用户说每天/每周/定时执行某个任务时使用。创建后告知用户运行 python agent.py cron apply 写入系统 crontab。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "任务名称，简短易读，如 daily-report"},
+                    "schedule": {"type": "string", "description": "cron 表达式，如 '0 9 * * *' 表示每天早上9点"},
+                    "task": {"type": "string", "description": "任务描述，作为 agent.py run 的 --task 参数"},
+                    "input_file": {"type": "string", "description": "可选，inputs/ 下的文件名，如 data.md。有文件时 agent 会读取该文件执行任务"},
+                },
+                "required": ["name", "schedule", "task"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_cron_jobs",
+            "description": "列出所有已注册的定时任务。",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "configure_iot_gateway",
+            "description": "保存 IoT 网关配置（base URL + API token）。支持 Home Assistant、Tuya 等平台。配置加密存储后可用 call_iot_gateway 控制设备。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "gateway_type": {
+                        "type": "string",
+                        "enum": ["home_assistant", "tuya", "generic"],
+                        "description": "网关类型，例如 'home_assistant' 或 'tuya'",
+                    },
+                    "base_url": {"type": "string", "description": "网关 base URL，例如 'http://homeassistant.local:8123'"},
+                    "api_token": {"type": "string", "description": "访问令牌（Long-Lived Access Token 或 API Key）"},
+                    "confirmed": {"type": "boolean", "description": "必须传 true 才会保存凭证"},
+                },
+                "required": ["gateway_type", "base_url", "api_token"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "call_iot_gateway",
+            "description": "调用已配置的 IoT 网关 REST API 控制或查询设备状态。例如：开灯、关空调、查传感器读数。需先用 configure_iot_gateway 完成配置。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "endpoint": {"type": "string", "description": "API 路径，例如 '/api/states/light.living_room' 或 '/api/services/light/turn_on'"},
+                    "method": {
+                        "type": "string",
+                        "enum": ["GET", "POST", "PUT", "DELETE"],
+                        "description": "HTTP 方法（默认 GET）",
+                    },
+                    "payload": {"type": "object", "description": "POST/PUT 请求体，例如 {\"entity_id\": \"light.living_room\"}"},
+                    "gateway_type": {
+                        "type": "string",
+                        "enum": ["home_assistant", "tuya", "generic"],
+                        "description": "要调用哪个网关（默认 home_assistant）",
+                    },
+                    "confirmed": {"type": "boolean", "description": "必须传 true 才会执行调用"},
+                },
+                "required": ["endpoint"],
+            },
+        },
+    },
 ]
 
 # 从 schema 提取 required 参数，用于前置校验
@@ -1349,6 +1929,11 @@ _DISPATCH = {
     "list_inbox": list_inbox,
     "search_emails": search_emails,
     "get_email_thread": get_email_thread,
+    "configure_email_account": configure_email_account,
+    "list_email_accounts_tool": list_email_accounts_tool,
+    "send_email_tool": send_email_tool,
+    "delete_email_tool": delete_email_tool,
+    "archive_email_tool": archive_email_tool,
     "make_markdown_report": make_markdown_report,
     "make_spreadsheet": make_spreadsheet,
     "make_webpage": make_webpage,
@@ -1358,10 +1943,16 @@ _DISPATCH = {
     "recall": recall,
     "list_outputs": list_outputs,
     "fetch_webpage": fetch_webpage,
+    "fetch_element": fetch_element,
+    "track_logistics": track_logistics,
     "search_web": search_web,
     "list_memories": list_memories,
     "confirm_memory": confirm_memory,
     "forget_memory": forget_memory,
+    "create_cron_job": create_cron_job,
+    "list_cron_jobs": list_cron_jobs,
+    "configure_iot_gateway": configure_iot_gateway,
+    "call_iot_gateway": call_iot_gateway,
 }
 
 
@@ -1407,20 +1998,16 @@ def run_tool(
 
     # 高风险工具二次确认
     risk = _RISK.get(name, "unknown")
-    if risk == "high" and not arguments.pop("confirmed", False):
+    confirmed = bool(arguments.pop("confirmed", False))
+    implicit_safe_file_move = _can_accept_implicit_soft_trash_confirmation(name, arguments, user_input)
+    if risk == "high" and not confirmed and not implicit_safe_file_move:
         err = f"高风险工具 '{name}' 需要用户确认。如需执行，请在参数中加入 confirmed: true。"
         _write_log(name, arguments, {"error": err}, 0,
                    task_id=task_id, user_input=user_input, model=model,
                    token_usage=token_usage, status="blocked", error=err)
         return {"error": err}
-    if risk == "high" and not _has_explicit_user_approval(name, user_input):
-        err = f"高风险工具 '{name}' 需要用户在当前请求中明确授权。"
-        _write_log(name, arguments, {"error": err}, 0,
-                   task_id=task_id, user_input=user_input, model=model,
-                   token_usage=token_usage, status="blocked", error=err)
-        return {"error": err}
 
-    # 终端删除安全：默认只允许“移到废纸篓/回收站”，禁止直接 rm（除非用户明确要求永久删除）
+    # 终端删除安全：默认只允许"移到废纸篓/回收站"，禁止直接 rm（除非用户明确要求永久删除）
     if name == "run_terminal_command":
         cmd = str(arguments.get("command") or "").strip().lower()
         user_text = (user_input or "").lower()

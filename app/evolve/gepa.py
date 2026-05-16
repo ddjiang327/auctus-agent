@@ -47,6 +47,42 @@ class Experiment:
     completed_at: Optional[float]
 
 
+def _variant_system_context(variant: Variant) -> str:
+    """Build a compact system-prompt injection for a variant under test.
+
+    For skill variants the patch is {"level0": ..., "level1": ...}.
+    For prompt variants the patch is the raw replacement prompt text.
+    """
+    if variant.target_type == "skill":
+        try:
+            patch = json.loads(variant.patch) if isinstance(variant.patch, str) else variant.patch
+        except (json.JSONDecodeError, TypeError):
+            return ""
+        level0 = (patch or {}).get("level0", "")
+        level1 = (patch or {}).get("level1", "")
+        return (
+            "[GEPA 实验 — 临时技能变体]\n"
+            f"请优先使用以下技能版本来完成任务（实验 ID: {variant.variant_id}）：\n"
+            f"步骤：\n{level0}\n"
+            + (f"\n详细说明：\n{level1}" if level1 else "")
+            + "\n如果该变体不适用，则回退到默认行为。"
+        )
+    if variant.target_type == "prompt":
+        return (
+            "[GEPA 实验 — 临时系统提示变体]\n"
+            f"以下为本次评估使用的替代系统提示（实验 ID: {variant.variant_id}）：\n"
+            f"{variant.patch[:3000]}"
+        )
+    if variant.target_type in ("tool_policy", "config"):
+        return (
+            "[GEPA 实验 — 临时配置变体]\n"
+            f"实验 ID: {variant.variant_id}\n"
+            f"描述: {variant.description}\n"
+            f"策略调整: {variant.patch[:2000]}"
+        )
+    return ""
+
+
 class VariantGenerator:
     """Generate variants of skills, prompts, or configs using LLM."""
 
@@ -224,36 +260,53 @@ class ExperimentRunner:
         exp: Experiment,
         eval_set_name: str = "weekly_eval",
     ) -> Experiment:
-        """Run the experiment: evaluate all variants."""
-        # Load eval set
+        """Run the experiment: evaluate all variants with real agent execution.
+
+        For each variant, temporarily injects the variant content into the
+        agent's system prompt so the evaluation reflects the variant's effect.
+        """
+        from .. import evolution as _evo
+
+        # Load or build eval set
         eval_path = settings.data_dir / "evolve" / "eval" / f"{eval_set_name}.json"
         if not eval_path.exists():
-            # Build eval set if not exists
             eval_mod.cli_build_eval(eval_set_name)
 
         eval_set = eval_mod.EvalSet.load(eval_path)
 
-        # Evaluate baseline (original)
+        # Save original build_runtime_context so we can restore it
+        _original_build = _evo.build_runtime_context
+
+        # Evaluate baseline (original agent, no variant injection)
         baseline_result = eval_mod.run_eval_set(eval_set, "baseline")
         exp.results["baseline"] = baseline_result
 
-        # Evaluate each variant
+        # Evaluate each variant with its content injected
         for variant in exp.variants:
-            # In real implementation, would temporarily apply variant
-            # and run eval. For now, simulate with slight variation.
-            result = eval_mod.run_eval_set(eval_set, variant.variant_id)
-            # Simulate variant performance (slightly better or worse)
-            import random
-            variation = random.uniform(-0.1, 0.15)
-            result["success_rate"] = min(1.0, max(0.0, result["success_rate"] + variation))
-            exp.results[variant.variant_id] = result
+            variant_context = _variant_system_context(variant)
 
-        # Select winner
-        best_variant = max(
+            def _patched_build(user_text: str, path=None, limit: int = 8) -> str:
+                base = _original_build(user_text, path=path, limit=limit)
+                if variant_context:
+                    return base + "\n\n" + variant_context if base else variant_context
+                return base
+
+            # Inject variant into runtime
+            _evo.build_runtime_context = _patched_build  # type: ignore[assignment]
+
+            try:
+                result = eval_mod.run_eval_set(eval_set, variant.variant_id)
+                exp.results[variant.variant_id] = result
+            finally:
+                _evo.build_runtime_context = _original_build  # type: ignore[assignment]
+
+        # Select winner (best success_rate, tie-break on lower tokens)
+        scored = sorted(
             [(vid, r) for vid, r in exp.results.items()],
-            key=lambda x: x[1]["success_rate"],
+            key=lambda x: (x[1]["success_rate"], -(x[1].get("total_tokens", 0))),
+            reverse=True,
         )
-        exp.winner_id = best_variant[0]
+        exp.winner_id = scored[0][0]
         exp.status = "completed"
         exp.completed_at = time.time()
 

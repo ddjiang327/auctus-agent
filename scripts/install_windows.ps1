@@ -3,7 +3,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$Root = Split-Path -Parent $PScriptRoot
+$Root = Split-Path -Parent $PSScriptRoot
 Set-Location $Root
 $ProjectDir = (Get-Location).Path
 
@@ -117,23 +117,66 @@ function Fail {
 }
 
 function Check-DiskSpace {
-  $drive = Split-Path -Qualifier $ProjectDir
-  $freeSpace = (Get-PSDrive -Name $drive.TrimEnd(':')).Free
-  $minSpace = 500MB  # Minimum 500MB free space
-  if ($freeSpace -lt $minSpace) {
-    Write-Warn "磁盘空间不足：剩余 $([math]::Round($freeSpace/1MB))MB"
-    Write-Info "建议至少保留 500MB 可用空间"
-  }
+  try {
+    $drive = Split-Path -Qualifier $ProjectDir
+    # Skip for UNC paths (\\server\share) — Get-PSDrive doesn't support them
+    if ($drive -match '^\\\\') { return }
+    $freeSpace = (Get-PSDrive -Name $drive.TrimEnd(':')).Free
+    $minSpace = 500MB
+    if ($freeSpace -lt $minSpace) {
+      Write-Warn "磁盘空间不足：剩余 $([math]::Round($freeSpace/1MB))MB"
+      Write-Info "建议至少保留 500MB 可用空间"
+    }
+  } catch { }
 }
 
 function Test-PythonCommand {
   param([string]$Cmd)
   try {
     $null = & $Cmd -c "import sys" 2>&1
-    return $true
+    return $LASTEXITCODE -eq 0
   } catch {
     return $false
   }
+}
+
+function Test-PythonExe {
+  param([string]$Path)
+  try {
+    if (!(Test-Path $Path)) { return $false }
+    $null = & $Path -c "import sys; print(sys.executable)" 2>&1
+    return $LASTEXITCODE -eq 0
+  } catch {
+    return $false
+  }
+}
+
+function Resolve-PythonCommand {
+  $candidates = @("python", "python3", "py")
+
+  foreach ($cmd in $candidates) {
+    if (Test-PythonCommand $cmd) {
+      return $cmd
+    }
+  }
+
+  $commonPaths = @(
+    "$env:LOCALAPPDATA\Programs\Python\Python*\python.exe",
+    "$env:ProgramFiles\Python*\python.exe",
+    "${env:ProgramFiles(x86)}\Python*\python.exe",
+    "C:\Python*\python.exe"
+  )
+
+  foreach ($pattern in $commonPaths) {
+    if ([string]::IsNullOrWhiteSpace($pattern)) { continue }
+    foreach ($path in Get-ChildItem -Path $pattern -ErrorAction SilentlyContinue | Sort-Object FullName -Descending) {
+      if (Test-PythonCommand $path.FullName) {
+        return $path.FullName
+      }
+    }
+  }
+
+  return $null
 }
 
 # ── Step 0: Pre-flight checks ─────────────────────────────────────────────────
@@ -150,23 +193,7 @@ Check-DiskSpace
 Write-Host ""
 Write-Info "检查 Python..."
 
-# Try multiple common Python commands
-$pythonCmd = $null
-foreach ($cmd in @("python", "python3", "py", "C:\Python*\python.exe")) {
-  if (Test-Path $cmd) {
-    $pythonCmd = $cmd
-    break
-  }
-  if ($cmd -eq "py") {
-    try {
-      $version = & $cmd --version 2>&1
-      if ($LASTEXITCODE -eq 0) {
-        $pythonCmd = $cmd
-        break
-      }
-    } catch { }
-  }
-}
+$pythonCmd = Resolve-PythonCommand
 
 if ($null -eq $pythonCmd) {
   Fail "找不到 Python" "系统未找到 python/python3 命令"
@@ -195,7 +222,7 @@ Write-Host ""
 Write-Info "检查虚拟环境..."
 
 if (Test-Path ".venv") {
-  if (Test-Path ".venv\Scripts\python.exe") {
+  if (Test-PythonExe ".\.venv\Scripts\python.exe") {
     Write-Success "虚拟环境已存在，跳过创建"
   } else {
     Write-Warn "检测到损坏的虚拟环境，正在删除并重新创建..."
@@ -207,8 +234,8 @@ if (!(Test-Path ".venv")) {
   Write-Info "创建虚拟环境..."
   try {
     & $pythonCmd -m venv .venv
-    if (!(Test-Path ".venv\Scripts\python.exe")) {
-      throw "虚拟环境创建后未找到 python.exe"
+    if (!(Test-PythonExe ".\.venv\Scripts\python.exe")) {
+      throw "虚拟环境创建后 python.exe 无法运行"
     }
     Write-Success "虚拟环境创建完成"
   } catch {
@@ -257,6 +284,25 @@ if (!(Test-Path ".env")) {
   Write-Success "配置文件已存在"
 }
 
+# Trial packages include a temporary DeepSeek key. Keep .env in sync so older
+# extracted folders do not keep a blank or stale key from a previous attempt.
+try {
+  $exampleKey = Select-String -Path ".env.example" -Pattern "^DEEPSEEK_API_KEY=(.+)$" | Select-Object -First 1
+  if ($exampleKey -and $exampleKey.Matches[0].Groups[1].Value.Trim()) {
+    $trialKey = $exampleKey.Matches[0].Groups[1].Value.Trim()
+    $envText = Get-Content ".env" -Raw
+    if ($envText -match "(?m)^DEEPSEEK_API_KEY=") {
+      $envText = $envText -replace "(?m)^DEEPSEEK_API_KEY=.*$", "DEEPSEEK_API_KEY=$trialKey"
+    } else {
+      $envText = $envText.TrimEnd() + "`r`nDEEPSEEK_API_KEY=$trialKey`r`n"
+    }
+    [System.IO.File]::WriteAllText((Join-Path $ProjectDir ".env"), $envText, [System.Text.Encoding]::UTF8)
+    Write-Success "已写入试用 DeepSeek Key"
+  }
+} catch {
+  Write-Warn "试用 Key 写入未完成，可继续启动；如模型认证失败请检查 .env。"
+}
+
 # ── Step 6: Doctor check (non-fatal) ─────────────────────────────────────────
 Write-Host ""
 Write-Info "运行环境检查..."
@@ -280,13 +326,9 @@ $Desktop = [System.Environment]::GetFolderPath("Desktop")
 $LauncherPath = Join-Path $Desktop "启动 Auctus Agent.bat"
 
 if (Test-Path $Desktop) {
-  if (!(Test-Path $LauncherPath)) {
-    $LauncherContent = "@echo off`r`ntitle Auctus Agent`r`ncd /d `"$ProjectDir`"`r`nstart `"`" `"http://127.0.0.1:8000`"`r`npowershell -ExecutionPolicy Bypass -File scripts\start_windows.ps1`r`n"
-    [System.IO.File]::WriteAllText($LauncherPath, $LauncherContent, [System.Text.Encoding]::ASCII)
-    Write-Success "已在桌面创建：「启动 Auctus Agent.bat」"
-  } else {
-    Write-Info "桌面启动入口已存在，跳过创建"
-  }
+  $LauncherContent = "@echo off`r`ntitle Auctus Agent`r`nset POWERSHELL=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe`r`nif not exist `"%POWERSHELL%`" set POWERSHELL=powershell`r`ncd /d `"$ProjectDir`"`r`nif not exist `"$ProjectDir\.venv\Scripts\python.exe`" (`r`n  echo Dependencies are missing. Running installer first...`r`n  `"%POWERSHELL%`" -NoProfile -ExecutionPolicy Bypass -File scripts\install_windows.ps1`r`n  if errorlevel 1 pause & exit /b 1`r`n)`r`nstart /min `"Auctus Agent Server`" `"%POWERSHELL%`" -NoProfile -WindowStyle Minimized -ExecutionPolicy Bypass -File scripts\start_windows.ps1`r`nfor /l %%i in (1,1,30) do (`r`n  `"%POWERSHELL%`" -NoProfile -Command `"try { Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8000/healthz -TimeoutSec 1 ^| Out-Null; exit 0 } catch { exit 1 }`" >nul 2>nul`r`n  if not errorlevel 1 goto open_ui`r`n  timeout /t 1 /nobreak >nul`r`n)`r`necho Auctus Agent did not start. Check the `"Auctus Agent Server`" window for errors.`r`npause`r`nexit /b 1`r`n:open_ui`r`nstart `"`" `"http://127.0.0.1:8000`"`r`n"
+  [System.IO.File]::WriteAllText($LauncherPath, $LauncherContent, [System.Text.Encoding]::ASCII)
+  Write-Success "已刷新桌面启动入口：「启动 Auctus Agent.bat」"
 } else {
   Write-Warn "无法访问桌面，跳过创建桌面入口"
 }

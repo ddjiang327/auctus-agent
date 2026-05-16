@@ -4,7 +4,34 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 PROJECT_DIR="$(pwd)"
 
-PYTHON_BIN="${PYTHON_BIN:-python3}"
+# Auto-detect Python 3.10+ (Homebrew / pyenv / official installer / system)
+_find_python() {
+  local candidates=(
+    python3.13 python3.12 python3.11 python3.10
+    /opt/homebrew/bin/python3.13 /opt/homebrew/bin/python3.12
+    /opt/homebrew/bin/python3.11 /opt/homebrew/bin/python3.10
+    /usr/local/bin/python3.13 /usr/local/bin/python3.12
+    /usr/local/bin/python3.11 /usr/local/bin/python3.10
+    /Library/Frameworks/Python.framework/Versions/3.12/bin/python3
+    /Library/Frameworks/Python.framework/Versions/3.11/bin/python3
+    /Library/Frameworks/Python.framework/Versions/3.10/bin/python3
+    python3 python
+  )
+  for cmd in "${candidates[@]}"; do
+    if command -v "$cmd" >/dev/null 2>&1; then
+      local ver
+      ver=$("$cmd" -c "import sys; print(sys.version_info.major*100+sys.version_info.minor)" 2>/dev/null) || continue
+      [ "$ver" -ge 310 ] && echo "$cmd" && return
+    fi
+  done
+}
+
+if [ -z "${PYTHON_BIN:-}" ]; then
+  PYTHON_BIN="$(_find_python || true)"
+fi
+if [ -z "${PYTHON_BIN:-}" ]; then
+  PYTHON_BIN="python3"  # will fail version check below with a clear message
+fi
 
 # ── User-friendly error handler ──────────────────────────────────────────────
 _fail() {
@@ -68,13 +95,22 @@ if [ ! -f ".env" ]; then
   echo "提示：你可以先启动 Web UI，在"首次设置向导/设置面板"里完成模型与 API key 配置。"
 fi
 
-# ── Step 6: Doctor check (non-fatal) ─────────────────────────────────────────
+# ── Step 6: Reset setup wizard so it always opens after install ──────────────
+.venv/bin/python - <<'PY' 2>/dev/null || true
+import sqlite3, pathlib
+db = pathlib.Path("data/secretary.db")
+if db.exists():
+    with sqlite3.connect(db) as conn:
+        conn.execute("DELETE FROM setup_state WHERE key='onboarding_completed'")
+PY
+
+# ── Step 7: Doctor check (non-fatal) ─────────────────────────────────────────
 .venv/bin/python agent.py doctor 2>/dev/null || {
   echo
   echo "doctor 检查未通过（通常是还没配置 API key）。你仍然可以先启动 Web UI 继续完成设置。"
 }
 
-# ── Step 7: Desktop launcher ──────────────────────────────────────────────────
+# ── Step 8: Desktop launcher ──────────────────────────────────────────────────
 DESKTOP="$HOME/Desktop"
 LAUNCHER="$DESKTOP/启动 Auctus Agent.command"
 

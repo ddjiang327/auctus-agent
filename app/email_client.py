@@ -1,14 +1,13 @@
-"""IMAP email client for reading inbox and searching emails.
-
-Only read-only IMAP operations are supported. Sending or deleting emails
-is intentionally excluded — use draft_email_reply to generate a draft text.
-"""
+"""IMAP/SMTP email client: read, send, delete, and archive emails."""
 from __future__ import annotations
 
 import email as email_lib
 import imaplib
 import re
+import smtplib
 from email.header import decode_header as _raw_decode_header
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from typing import Union
 
 
@@ -159,5 +158,97 @@ def get_email_content(account: dict, uid: str, max_body_chars: int = 8000) -> di
             "date": msg.get("Date", ""),
             "body": body,
         }
+    finally:
+        _safe_logout(conn)
+
+
+def send_email(account: dict, to: str, subject: str, body: str, cc: str = "") -> dict:
+    host = account["smtp_host"]
+    port = int(account.get("smtp_port", 465))
+    ssl = bool(account.get("smtp_ssl", True))
+    username = account.get("username") or account.get("email_address", "")
+    password = account.get("password", "")
+    from_addr = account.get("email_address", username)
+
+    msg = MIMEMultipart("alternative")
+    msg["From"] = from_addr
+    msg["To"] = to
+    msg["Subject"] = subject
+    if cc:
+        msg["Cc"] = cc
+    msg.attach(MIMEText(body, "plain", "utf-8"))
+
+    recipients = [a.strip() for a in to.split(",") if a.strip()]
+    if cc:
+        recipients += [a.strip() for a in cc.split(",") if a.strip()]
+
+    try:
+        if ssl:
+            with smtplib.SMTP_SSL(host, port) as smtp:
+                smtp.login(username, password)
+                smtp.sendmail(from_addr, recipients, msg.as_string())
+        else:
+            with smtplib.SMTP(host, port) as smtp:
+                smtp.ehlo()
+                smtp.starttls()
+                smtp.login(username, password)
+                smtp.sendmail(from_addr, recipients, msg.as_string())
+        return {"ok": True, "to": to, "subject": subject}
+    except smtplib.SMTPException as e:
+        return {"ok": False, "error": str(e)}
+    except OSError as e:
+        return {"ok": False, "error": f"connection error: {e}"}
+
+
+def delete_email(account: dict, uid: str, folder: str = "INBOX") -> dict:
+    conn = _connect(account)
+    try:
+        status, _ = conn.select(folder)
+        if status != "OK":
+            return {"ok": False, "error": f"cannot select folder: {folder}"}
+        conn.store(uid.encode(), "+FLAGS", r"(\Deleted)")
+        conn.expunge()
+        return {"ok": True, "uid": uid, "action": "deleted"}
+    except imaplib.IMAP4.error as e:
+        return {"ok": False, "error": str(e)}
+    finally:
+        _safe_logout(conn)
+
+
+# Archive folder names by provider (derived from smtp_host)
+_ARCHIVE_FOLDERS = {
+    "smtp.gmail.com": "[Gmail]/All Mail",
+    "smtp.office365.com": "Archive",
+    "smtp.mail.me.com": "Archive",
+    "smtp.mail.yahoo.com": "Archive",
+    "smtp.qq.com": "Archive",
+    "smtp.163.com": "Archive",
+}
+
+
+def archive_email(account: dict, uid: str, archive_folder: str = "") -> dict:
+    if not archive_folder:
+        smtp_host = account.get("smtp_host", "")
+        archive_folder = _ARCHIVE_FOLDERS.get(smtp_host, "Archive")
+
+    conn = _connect(account)
+    try:
+        status, _ = conn.select("INBOX")
+        if status != "OK":
+            return {"ok": False, "error": "cannot select INBOX"}
+        # Copy to archive folder
+        status, _ = conn.copy(uid.encode(), archive_folder)
+        if status != "OK":
+            # Try creating the folder then copying
+            conn.create(archive_folder)
+            status, _ = conn.copy(uid.encode(), archive_folder)
+            if status != "OK":
+                return {"ok": False, "error": f"cannot copy to {archive_folder}"}
+        # Delete from INBOX
+        conn.store(uid.encode(), "+FLAGS", r"(\Deleted)")
+        conn.expunge()
+        return {"ok": True, "uid": uid, "action": "archived", "folder": archive_folder}
+    except imaplib.IMAP4.error as e:
+        return {"ok": False, "error": str(e)}
     finally:
         _safe_logout(conn)

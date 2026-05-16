@@ -375,27 +375,53 @@ def match_skills(user_text: str, limit: int = 3, path: Optional[Path] = None) ->
     return [{**d, "match_score": s} for s, _, d in scored[:limit]]
 
 
+def _all_applied_skills(path: Optional[Path] = None) -> list[dict]:
+    """Return all applied skills (name + keywords only, for index use)."""
+    init_db(path)
+    with sqlite3.connect(path or _db_path()) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT name, triggers_json FROM skill_candidates WHERE status='applied'",
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def build_skill_context(user_text: str, path: Optional[Path] = None, strong_threshold: int = 4) -> str:
     """Build compact skill context for system prompt injection.
 
-    Injects L0 (short steps) for all matched skills.
-    Upgrades to L1 (full detail) when match_score >= strong_threshold.
+    - Matched skills (score > 0): inject full L0 steps; L1 if strong match.
+    - Unmatched applied skills: inject a compact index so the LLM can reason
+      about intent and activate them even on fuzzy / ambiguous input.
     """
     matched = match_skills(user_text, limit=3, path=path)
-    if not matched:
-        return ""
-    lines = [
-        "[可用技能]",
-        "以下技能来自用户确认过的历史任务模式，如果当前任务与之相关，请参考执行步骤：",
-    ]
-    for skill in matched:
-        is_strong = skill["match_score"] >= strong_threshold
-        l1 = (skill.get("level1") or "").strip()
-        body = l1 if is_strong and l1 else skill["level0"].strip()
-        label = "（详细版）" if is_strong and l1 else ""
-        lines.append(f"\n【{skill['name']}】{label}")
-        lines.append(body)
-    return "\n".join(lines)
+    matched_names = {s["name"] for s in matched}
+
+    lines: list[str] = []
+
+    if matched:
+        lines += [
+            "[可用技能]",
+            "以下技能与当前请求相关，请按步骤执行：",
+        ]
+        for skill in matched:
+            is_strong = skill["match_score"] >= strong_threshold
+            l1 = (skill.get("level1") or "").strip()
+            body = l1 if is_strong and l1 else skill["level0"].strip()
+            label = "（详细版）" if is_strong and l1 else ""
+            lines.append(f"\n【{skill['name']}】{label}")
+            lines.append(body)
+
+    # Compact index for skills that didn't match by keyword —
+    # lets the LLM pick them up when user intent is fuzzy.
+    others = [s for s in _all_applied_skills(path) if s["name"] not in matched_names]
+    if others:
+        lines.append("\n[其他可用技能 — 根据用户意图自行判断是否适用]")
+        for s in others:
+            triggers = json.loads(s.get("triggers_json") or "{}")
+            kws = "、".join(triggers.get("keywords", [])[:6])
+            lines.append(f"- 【{s['name']}】触发词：{kws}")
+
+    return "\n".join(lines) if lines else ""
 
 
 init_db()

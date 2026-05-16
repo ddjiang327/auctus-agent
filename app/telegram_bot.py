@@ -14,11 +14,12 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler, ContextTypes, filters,
 )
 
-from . import agent
+from . import agent, server
 from .config import settings
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("tg")
+_PENDING_PERMISSIONS: dict[int, dict] = {}
 
 
 def _auth_ok(user_id: Optional[int]) -> bool:
@@ -46,10 +47,67 @@ async def _reply_agent_result(message, result: dict) -> None:
     await message.reply_text(reply)
 
     for path in result.get("files", []):
-        p = Path(path)
+        p = _telegram_file_path(path)
         if p.exists():
             with p.open("rb") as fh:
                 await message.reply_document(document=fh, filename=p.name)
+
+
+def _telegram_file_path(path: str) -> Path:
+    if path.startswith("/files/"):
+        rel = path.removeprefix("/files/").lstrip("/")
+        return (settings.output_dir / rel).resolve()
+    return Path(path)
+
+
+def _permission_choice(text: str) -> Optional[str]:
+    value = (text or "").strip().lower()
+    if value in {"允许一次", "本次允许", "一次", "once", "/once"}:
+        return "once"
+    if value in {"始终允许", "总是允许", "以后都允许", "always", "/always"}:
+        return "always"
+    if value in {"拒绝", "不允许", "取消", "no", "deny", "/no"}:
+        return "no"
+    return None
+
+
+def _permission_reply_text(request: dict) -> str:
+    kind = request.get("type", "permission")
+    label = {
+        "terminal": "终端命令权限",
+        "files": "文件访问权限",
+        "calendar": "日历/提醒事项权限",
+    }.get(kind, "权限")
+    return (
+        f"需要{label}：{request.get('message', '')}\n\n"
+        "请直接回复：\n"
+        "- 允许一次\n"
+        "- 始终允许\n"
+        "- 拒绝"
+    )
+
+
+def _run_chat_for_telegram(uid: int, text: str, choice: Optional[str] = None) -> dict:
+    session_id = f"tg-{uid}"
+    pending = _PENDING_PERMISSIONS.get(uid)
+    payload = {"session_id": session_id, "message": text}
+    if pending and choice:
+        payload["message"] = pending["message"]
+        if pending["type"] == "terminal":
+            payload["terminal_permission"] = choice
+        elif pending["type"] == "files":
+            payload["file_permission"] = choice
+        elif pending["type"] == "calendar":
+            payload["calendar_permission"] = choice
+        _PENDING_PERMISSIONS.pop(uid, None)
+
+    out = server.chat(server.ChatIn(**payload))
+    data = out.model_dump() if hasattr(out, "model_dump") else out.dict()
+    if data.get("permission_request"):
+        req = data["permission_request"]
+        _PENDING_PERMISSIONS[uid] = {"message": text, "type": req.get("type", "")}
+        return {"reply": _permission_reply_text(req), "files": [], "permission_request": req}
+    return data
 
 
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -71,8 +129,11 @@ async def handle_msg(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.chat.send_action("typing")
 
     try:
-        # agent.chat 是同步的，放线程池里跑避免阻塞 event loop
-        result = await asyncio.to_thread(agent.chat, session_id, text)
+        choice = _permission_choice(text)
+        if _PENDING_PERMISSIONS.get(uid) and choice is None:
+            await update.message.reply_text("上一条任务正在等权限确认。请回复：允许一次 / 始终允许 / 拒绝。")
+            return
+        result = await asyncio.to_thread(_run_chat_for_telegram, uid, text, choice)
         await _reply_agent_result(update.message, result)
     except Exception as e:
         log.exception("Telegram text task failed")

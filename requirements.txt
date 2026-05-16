@@ -15,3 +15,9 @@ pymupdf>=1.24
 python-docx>=1.1
 pandas>=2.2
 tabulate>=0.9
+pywebview>=5.0
+# Desktop enhanced features (optional)
+pystray>=0.19
+Pillow>=10.0
+pynput>=1.7
+plyer>=2.1

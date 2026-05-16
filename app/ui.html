@@ -4,6 +4,14 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Auctus Agent</title>
+  <!-- PWA -->
+  <link rel="manifest" href="/manifest.json" />
+  <meta name="theme-color" content="#0B1020" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Auctus" />
+  <link rel="apple-touch-icon" href="/icon-192.png" />
   <style>
     :root{
       /* The Digital Companion + Minimalist Capsule */
@@ -474,6 +482,24 @@
       width:100%;
       box-sizing:border-box;
     }
+    select{
+      color-scheme: light;
+      background-color:#202633;
+      color:#EAF0FF;
+    }
+    select option,
+    select optgroup{
+      color:#111827 !important;
+      background:#FFFFFF !important;
+    }
+    select option:checked{
+      color:#FFFFFF !important;
+      background:#1F6FEB !important;
+    }
+    select option:disabled{
+      color:#6B7280 !important;
+      background:#FFFFFF !important;
+    }
     input[type="password"]{font-family: var(--mono)}
     .muted{color: var(--muted); font-size:12px; line-height:1.45}
     .status{font-size:12px; margin-top:6px; color: rgba(234,240,255,.72)}
@@ -542,6 +568,15 @@
     }
     .field{display:grid; gap:6px; margin-bottom:12px}
     .field label{font-size:12px; color: rgba(234,240,255,.72)}
+    .settings-callout{
+      border:1px solid rgba(0,245,255,.22);
+      background: linear-gradient(135deg, rgba(45,124,255,.12), rgba(0,245,255,.06));
+      border-radius: var(--radius2);
+      padding: 12px;
+      margin-bottom: 12px;
+    }
+    .settings-callout strong{display:block;font-size:13px;margin-bottom:6px}
+    .settings-callout p{margin:0 0 10px;color:var(--muted);font-size:12px;line-height:1.45}
     .wizard-actions{
       display:flex; justify-content:space-between; align-items:center; gap:10px;
       margin-top: 12px;
@@ -620,6 +655,7 @@
         </div>
         <button id="stopBtn" class="danger" type="button" title="紧急停止（取消当前请求）">停止</button>
         <button id="openSettings" type="button" title="设置">⚙ 设置</button>
+        <button id="shutdownBtn" type="button" title="关闭 Auctus Agent 服务">关闭</button>
       </div>
     </header>
 
@@ -656,17 +692,36 @@
       <button id="closeSettings" class="ghost" type="button">关闭</button>
     </div>
 
+    <div class="settings-callout">
+      <strong id="hostedQuickTitle">Auctus 托管 API</strong>
+      <p id="hostedQuickHelp">推荐内部测试用户使用：登录 Auctus API 后自动获取客户自己的 API Key，并连接到线上托管服务。</p>
+      <button id="openHostedSetup" class="primary" type="button">连接托管 API</button>
+    </div>
+
     <div class="section">
-      <h3>模型</h3>
+      <h3 id="versionSectionTitle">版本与更新</h3>
+      <div class="row" style="align-items:flex-start">
+        <div style="flex:1;min-width:0">
+          <div id="versionSummary" class="muted">正在检查版本…</div>
+          <div id="versionDetail" class="status"></div>
+        </div>
+        <button id="checkVersion" type="button">检查更新</button>
+        <button id="openDownload" class="primary" type="button">下载最新版</button>
+      </div>
+    </div>
+
+    <div class="section">
+      <h3 id="modelSectionTitle">模型</h3>
       <div class="row">
         <select id="model"></select>
         <button id="saveModel" type="button">切换</button>
+        <button id="openSetup" type="button">重新设置</button>
       </div>
       <div class="muted">建议：先选模型，再保存对应的 API key（或使用本地模型/托管模式）。</div>
     </div>
 
     <div class="section">
-      <h3>模型路由 / API Key</h3>
+      <h3 id="routeSectionTitle">模型路由 / API Key</h3>
       <div class="row">
         <select id="route"></select>
         <button id="saveRoute" type="button">保存</button>
@@ -683,7 +738,7 @@
     </div>
 
     <div class="section">
-      <h3>系统语言 / 权限</h3>
+      <h3 id="languageSectionTitle">系统语言 / 权限</h3>
       <div class="row">
         <select id="uiMode">
           <option value="companion">伙伴模式（沉浸）</option>
@@ -724,7 +779,7 @@
     </div>
 
     <div class="section">
-      <h3>文件权限（工作区）</h3>
+      <h3 id="workspaceSectionTitle">文件权限（工作区）</h3>
       <div class="muted" style="margin-bottom:10px">建议授权一个专门的工作文件夹，例如 Documents/Auctus Workspace。</div>
       <div class="row">
         <input id="workspacePath" placeholder="授权文件夹路径" />
@@ -737,7 +792,7 @@
     </div>
 
     <div class="section">
-      <h3>上传文件</h3>
+      <h3 id="uploadSectionTitle">上传文件</h3>
       <div class="row">
         <input id="file" type="file" />
       </div>
@@ -818,13 +873,13 @@
     </div>
 
     <div class="section">
-      <h3>候选记忆</h3>
+      <h3 id="memorySectionTitle">候选记忆</h3>
       <div class="muted">来自"首次设置向导/自我介绍"的信息会先进入候选列表，你可以确认或拒绝。</div>
       <div id="memories" style="display:grid;gap:10px;margin-top:10px"></div>
     </div>
 
     <div class="section">
-      <h3>工具日志</h3>
+      <h3 id="logsSectionTitle">工具日志</h3>
       <div class="row" style="justify-content:flex-end">
         <button id="refreshLogs" type="button">刷新</button>
       </div>
@@ -910,11 +965,11 @@
         </div>
 
         <div id="hostedPanel" class="section" style="margin-top:10px; display:none">
-          <h3>Auctus 托管 API</h3>
+          <h3 id="hostedPanelTitle">Auctus 托管 API</h3>
           <div id="hostedLoginForm">
             <div class="two-col">
               <div class="field">
-                <label>服务区域</label>
+                <label id="hostedRegionLabel">服务区域</label>
                 <select id="setupHostedRegion">
                   <option value="auto">自动选择</option>
                   <option value="global">海外 (Vercel)</option>
@@ -922,23 +977,23 @@
                 </select>
               </div>
               <div class="field">
-                <label>API 服务器地址</label>
-                <input id="setupHostedUrl" placeholder="https://api.auctus.ai 或 http://localhost:8001" value="http://localhost:8001" />
+                <label id="hostedUrlLabel">API 服务器地址</label>
+                <input id="setupHostedUrl" placeholder="http://120.24.223.0" value="http://120.24.223.0" />
               </div>
             </div>
             <div class="two-col">
               <div class="field">
-                <label>邮箱</label>
+                <label id="hostedEmailLabel">邮箱</label>
                 <input id="setupHostedEmail" type="email" placeholder="your@email.com" />
               </div>
               <div class="field">
-                <label>密码</label>
+                <label id="hostedPasswordLabel">密码</label>
                 <input id="setupHostedPassword" type="password" placeholder="密码" />
               </div>
             </div>
             <div class="row" style="justify-content:space-between;align-items:center">
               <div style="font-size:12px;color:var(--muted)">
-                还没有账号？<a href="#" id="hostedRegisterLink" style="color:var(--accent)">立即注册</a>
+                <span id="hostedNoAccountText">还没有账号？</span><a href="#" id="hostedRegisterLink" style="color:var(--accent)">立即注册</a>
               </div>
               <button id="setupHostedLogin" type="button" class="primary">登录并获取 API Key</button>
             </div>
@@ -973,31 +1028,31 @@
           </div>
         </div>
 
-        <div class="hint" style="margin-top:14px">第 2 步：权限与角色（可选）</div>
+        <div class="hint" id="wizardStep2Hint" style="margin-top:14px">第 2 步：权限与角色（可选）</div>
         <div class="two-col">
           <div class="field">
-            <label>文件权限范围</label>
+            <label id="setupFileScopeLabel">文件权限范围</label>
             <select id="setupPermissionScope">
               <option value="workspace">仅授权文件夹</option>
-              <option value="full_computer">整台电脑</option>
+              <option value="full_computer" selected>整台电脑</option>
             </select>
           </div>
           <div class="field">
-            <label>终端命令权限</label>
+            <label id="setupTerminalLabel">终端命令权限</label>
             <select id="setupTerminalAccess">
               <option value="disabled">关闭</option>
-              <option value="enabled">允许</option>
+              <option value="enabled" selected>允许</option>
             </select>
           </div>
         </div>
 
         <div class="two-col">
           <div class="field">
-            <label>伙伴的名字（Agent Name）</label>
+            <label id="setupAgentNameLabel">伙伴的名字（Agent Name）</label>
             <input id="setupAgentName" placeholder="例如：小助手 / Nova / R1" />
           </div>
           <div class="field">
-            <label>AI 性格（Persona）</label>
+            <label id="setupPersonaLabel">AI 性格（Persona）</label>
             <select id="setupPersona">
               <option value="professional">专业简洁</option>
               <option value="cool">高冷御姐</option>
@@ -1008,27 +1063,27 @@
           </div>
         </div>
         <div class="field">
-          <label>一句话自我介绍（可选）</label>
+          <label id="setupIntroLabel">一句话自我介绍（可选）</label>
           <input id="setupUserIntro" placeholder="例如：我在做一个本地 Agent 项目，希望你尽量结构化输出。" />
         </div>
         <label style="display:flex;align-items:center;gap:10px;color:var(--muted);font-size:12px">
           <input id="setupSaveProfile" type="checkbox" style="width:18px;height:18px" />
-          把以上信息写入"候选记忆"（之后可确认/拒绝）
+          <span id="setupSaveProfileLabel">把以上信息写入"候选记忆"（之后可确认/拒绝）</span>
         </label>
 
-        <div class="hint" style="margin-top:14px">第 3 步：使用方式选择（可选）</div>
+        <div class="hint" id="wizardStep3Hint" style="margin-top:14px">第 3 步：使用方式选择（可选）</div>
         <div class="grid" id="usageModeGrid">
           <div class="card-choice active" data-usage="web">
-            <strong>本地网页</strong>
-            <span>通过浏览器访问本机运行的 Web 界面（默认）。</span>
+            <strong id="usageWebTitle">本地网页</strong>
+            <span id="usageWebDesc">通过浏览器访问本机运行的 Web 界面（默认）。</span>
           </div>
           <div class="card-choice" data-usage="telegram">
             <strong>Telegram Bot</strong>
-            <span>通过 Telegram 与 Agent 对话（需要配置 Bot Token）。</span>
+            <span id="usageTelegramDesc">通过 Telegram 与 Agent 对话（需要配置 Bot Token）。</span>
           </div>
           <div class="card-choice" data-usage="lan">
-            <strong>局域网访问</strong>
-            <span>在同一网络下的其他设备访问（需配置防火墙）。</span>
+            <strong id="usageLanTitle">局域网访问</strong>
+            <span id="usageLanDesc">在同一网络下的其他设备访问（需配置防火墙）。</span>
           </div>
         </div>
         <div id="usageModeInfo" style="margin-top:8px;padding:10px 12px;background:rgba(255,255,255,.04);border-radius:8px;font-size:12px;color:var(--muted)">
@@ -1079,20 +1134,427 @@
       awaitingChoice: null, // {type, prompt, options:[{label,raw}]}
       awaitingConfirm: null, // {type, prompt, yesLabel, yesMessage, noMessage}
       stopRequested: false,
+      language: 'en',
     };
+    const DEFAULT_HOSTED_API_BASE = 'http://120.24.223.0';
+    const DEFAULT_MODELS = ['deepseek-chat', 'deepseek/deepseek-chat', 'gpt-4o-mini', 'claude-sonnet-4-5', 'ollama/llama3.1'];
+    const DEFAULT_PROVIDERS = ['deepseek', 'openai', 'anthropic'];
+
+    const I18N = {
+      zh: {
+        stop: '停止',
+        settings: '⚙ 设置',
+        close: '关闭',
+        idle: '待命',
+        thinking: '处理中…',
+        readyCore: 'READY',
+        thinkingCore: 'THINKING',
+        composer: '像对一个伙伴下指令：例如“读取 test_prd.md 并生成总结”',
+        choiceComposer: '请选择一个选项（也可以直接点下面的按钮）…',
+        confirmComposer: '请确认执行还是取消（也可以点下面的按钮）…',
+        newline: '换行',
+        send: '发送',
+        settingsTitle: '设置',
+        hostedQuickHelp: '推荐内部测试用户使用：登录 Auctus API 后自动获取客户自己的 API Key，并连接到线上托管服务。',
+        hostedQuickButton: '连接托管 API',
+        versionTitle: '版本与更新',
+        checkingVersion: '正在检查版本…',
+        checkUpdate: '检查更新',
+        downloadLatest: '下载最新版',
+        versionCurrent: '当前版本',
+        versionLatest: '最新版本',
+        updateAvailable: '发现新版本，可以下载更新。',
+        updateCurrent: '当前已是最新版本。',
+        updateUnknown: '暂时无法获取最新版本。',
+        modelTitle: '模型',
+        switchModel: '切换',
+        setupAgain: '重新设置',
+        modelHelp: '建议：先选模型，再保存对应的 API key（或使用本地模型/托管模式）。',
+        routeTitle: '模型路由 / API Key',
+        save: '保存',
+        apiKeyPlaceholder: '粘贴你的 API key（只保存在本地）',
+        validate: '验证',
+        saveKey: '保存 Key',
+        languageTitle: '系统语言 / 权限',
+        companionMode: '伙伴模式（沉浸）',
+        capsuleMode: '胶囊模式（轻量）',
+        uiModeHelp: '胶囊模式会自动“收敛历史”，只保留最近的对话内容，让界面更像 Raycast/Spotlight。',
+        workspaceOnly: '仅授权文件夹',
+        fullComputer: '整台电脑',
+        terminalOff: '关闭终端命令',
+        terminalOn: '允许终端命令',
+        calendarOff: '不允许访问日历',
+        calendarOn: '允许访问日历',
+        workspaceTitle: '文件权限（工作区）',
+        workspaceHelp: '建议授权一个专门的工作文件夹，例如 Documents/Auctus Workspace。',
+        workspacePlaceholder: '授权文件夹路径',
+        choose: '选择',
+        authorize: '授权',
+        uploadTitle: '上传文件',
+        upload: '上传到 inputs/',
+        memoryTitle: '候选记忆',
+        memoryHelp: '来自“首次设置向导/自我介绍”的信息会先进入候选列表，你可以确认或拒绝。',
+        logsTitle: '工具日志',
+        refresh: '刷新',
+        noMemories: '暂无候选记忆。',
+        noLogs: '暂无日志。',
+        confirm: '确认',
+        reject: '拒绝',
+        details: '详情',
+        outputFiles: '输出文件：',
+        folderTitle: '选择要授权的文件夹',
+        parent: '上一级',
+        useFolder: '使用此文件夹',
+        folderHelp: '只显示可访问的子文件夹；部分系统目录可能不可读。',
+        firstSetup: '首次设置向导',
+        setupSubtitle: '像给“数字伙伴”上电：选择模型接入方式、权限与个性。',
+        setupLater: '稍后再说',
+        setupStep1: '第 1 步：选择模型接入方式',
+        ownApi: '使用自己的 API Key',
+        ownApiDesc: '适合个人开发者：你提供 OpenAI/Anthropic/DeepSeek 等 Key，本地保存。',
+        localModel: '本地模型',
+        localModelDesc: '适合离线/隐私：例如 Ollama。无需云端 Key（但需要你本机已安装模型）。',
+        hostedApi: 'Auctus 托管 API',
+        hostedApiDesc: '适合小白：无需配置 API Key，登录账号即可使用。支持套餐订阅 + 余额计费。',
+        modelLabel: '模型（Model）',
+        languageLabel: '语言（System Language）',
+        providerLabel: '服务商（Provider）',
+        hostedRegion: '服务区域',
+        hostedUrl: 'API 服务器地址',
+        email: '邮箱',
+        password: '密码',
+        finishSetup: '完成设置',
+        saving: '保存中…',
+        setupDone: '首次设置已完成。你现在可以发第一条任务。',
+        greeting: '你好，我在这里。把任务交给我吧。你也可以打开右上角 ⚙ 设置，完成模型与权限配置。',
+        languageSaved: '语言已保存。',
+        languageSaveFailed: '保存失败：',
+        needHostedLogin: '请先登录 Auctus 托管 API 账号。',
+        needProviderKey: '请填写 Provider 和 API key。',
+        needEmail: '请填写登录邮箱。',
+        hostedPanelTitle: 'Auctus 托管 API',
+        hostedRegionLabel: '服务区域',
+        hostedRegionAuto: '自动选择',
+        hostedRegionGlobal: '海外 (Vercel)',
+        hostedRegionCn: '国内阿里云',
+        hostedUrlLabel: 'API 服务器地址',
+        hostedEmailLabel: '邮箱',
+        hostedPasswordLabel: '密码',
+        hostedPasswordPlaceholder: '密码',
+        hostedNoAccount: '还没有账号？',
+        hostedRegister: '立即注册',
+        hostedLoginBtn: '登录并获取 API Key',
+        wizardStep2: '第 2 步：权限与角色（可选）',
+        fileScopeLabel: '文件权限范围',
+        terminalLabel: '终端命令权限',
+        setupTerminalOff: '关闭',
+        setupTerminalOn: '允许',
+        agentNameLabel: '伙伴的名字（Agent Name）',
+        agentNamePlaceholder: '例如：小助手 / Nova / R1',
+        personaLabel: 'AI 性格（Persona）',
+        personaProfessional: '专业简洁',
+        personaCool: '高冷御姐',
+        personaUncle: '知心大叔',
+        personaBro: '可靠小哥',
+        personaGirl: '元气萌妹',
+        introLabel: '一句话自我介绍（可选）',
+        introPlaceholder: '例如：我在做一个本地 Agent 项目，希望你尽量结构化输出。',
+        saveProfileLabel: '把以上信息写入"候选记忆"（之后可确认/拒绝）',
+        wizardStep3: '第 3 步：使用方式选择（可选）',
+        usageWebTitle: '本地网页',
+        usageWebDesc: '通过浏览器访问本机运行的 Web 界面（默认）。',
+        usageTelegramDesc: '通过 Telegram 与 Agent 对话（需要配置 Bot Token）。',
+        usageLanTitle: '局域网访问',
+        usageLanDesc: '在同一网络下的其他设备访问（需配置防火墙）。',
+      },
+      en: {
+        stop: 'Stop',
+        settings: '⚙ Settings',
+        close: 'Close',
+        idle: 'Ready',
+        thinking: 'Working…',
+        readyCore: 'READY',
+        thinkingCore: 'THINKING',
+        composer: 'Ask your agent, e.g. “Read test_prd.md and summarize it”',
+        choiceComposer: 'Choose an option, or click one of the buttons below…',
+        confirmComposer: 'Confirm or cancel, or click one of the buttons below…',
+        newline: 'New line',
+        send: 'Send',
+        settingsTitle: 'Settings',
+        hostedQuickHelp: 'Recommended for internal trials: log in to Auctus API, fetch your customer API key, and connect to the hosted service.',
+        hostedQuickButton: 'Connect Hosted API',
+        versionTitle: 'Version & Updates',
+        checkingVersion: 'Checking version…',
+        checkUpdate: 'Check',
+        downloadLatest: 'Download Latest',
+        versionCurrent: 'Current',
+        versionLatest: 'Latest',
+        updateAvailable: 'A newer version is available.',
+        updateCurrent: 'You are on the latest version.',
+        updateUnknown: 'Latest version is unavailable right now.',
+        modelTitle: 'Model',
+        switchModel: 'Switch',
+        setupAgain: 'Setup',
+        modelHelp: 'Tip: choose a model first, then save the matching API key, or use local/hosted mode.',
+        routeTitle: 'Model Route / API Key',
+        save: 'Save',
+        apiKeyPlaceholder: 'Paste your API key (stored locally only)',
+        validate: 'Validate',
+        saveKey: 'Save Key',
+        languageTitle: 'Language / Permissions',
+        companionMode: 'Companion mode',
+        capsuleMode: 'Capsule mode',
+        uiModeHelp: 'Capsule mode keeps only recent messages so the interface feels lighter.',
+        workspaceOnly: 'Workspace only',
+        fullComputer: 'Full computer',
+        terminalOff: 'Disable terminal commands',
+        terminalOn: 'Allow terminal commands',
+        calendarOff: 'Do not allow calendar access',
+        calendarOn: 'Allow calendar access',
+        workspaceTitle: 'File Permission (Workspace)',
+        workspaceHelp: 'Authorize a dedicated workspace folder, such as Documents/Auctus Workspace.',
+        workspacePlaceholder: 'Workspace folder path',
+        choose: 'Choose',
+        authorize: 'Authorize',
+        uploadTitle: 'Upload File',
+        upload: 'Upload to inputs/',
+        memoryTitle: 'Memory Candidates',
+        memoryHelp: 'Information from setup/profile is saved as candidates first. You can confirm or reject it.',
+        logsTitle: 'Tool Logs',
+        refresh: 'Refresh',
+        noMemories: 'No memory candidates yet.',
+        noLogs: 'No logs yet.',
+        confirm: 'Confirm',
+        reject: 'Reject',
+        details: 'Details',
+        outputFiles: 'Output files: ',
+        folderTitle: 'Choose a folder to authorize',
+        parent: 'Parent',
+        useFolder: 'Use this folder',
+        folderHelp: 'Only accessible folders are shown. Some system folders may be unavailable.',
+        firstSetup: 'First Setup',
+        setupSubtitle: 'Choose model access, permissions, and personality.',
+        setupLater: 'Do this later',
+        setupStep1: 'Step 1: choose how to connect a model',
+        ownApi: 'Use your own API key',
+        ownApiDesc: 'For developers: provide an OpenAI/Anthropic/DeepSeek key and keep it locally.',
+        localModel: 'Local model',
+        localModelDesc: 'For offline/privacy use, such as Ollama. Requires a model installed locally.',
+        hostedApi: 'Auctus Hosted API',
+        hostedApiDesc: 'No model API key needed. Log in and use balance or a subscription.',
+        modelLabel: 'Model',
+        languageLabel: 'System Language',
+        providerLabel: 'Provider',
+        hostedRegion: 'Service Region',
+        hostedUrl: 'API Server URL',
+        email: 'Email',
+        password: 'Password',
+        finishSetup: 'Finish Setup',
+        saving: 'Saving…',
+        setupDone: 'First setup is complete. You can send your first task now.',
+        greeting: 'Hi, I am here. Send me a task, or open ⚙ Settings to configure model and permissions.',
+        languageSaved: 'Language saved.',
+        languageSaveFailed: 'Save failed: ',
+        needHostedLogin: 'Please log in to your Auctus Hosted API account first.',
+        needProviderKey: 'Please enter a provider and API key.',
+        needEmail: 'Please enter your login email.',
+        hostedPanelTitle: 'Auctus Hosted API',
+        hostedRegionLabel: 'Service Region',
+        hostedRegionAuto: 'Auto',
+        hostedRegionGlobal: 'Global (Vercel)',
+        hostedRegionCn: 'China (Aliyun)',
+        hostedUrlLabel: 'API Server URL',
+        hostedEmailLabel: 'Email',
+        hostedPasswordLabel: 'Password',
+        hostedPasswordPlaceholder: 'Password',
+        hostedNoAccount: 'No account? ',
+        hostedRegister: 'Sign up',
+        hostedLoginBtn: 'Log in & get API Key',
+        wizardStep2: 'Step 2: Permissions & role (optional)',
+        fileScopeLabel: 'File permission scope',
+        terminalLabel: 'Terminal access',
+        setupTerminalOff: 'Disabled',
+        setupTerminalOn: 'Allow',
+        agentNameLabel: 'Agent Name',
+        agentNamePlaceholder: 'e.g. Nova / R1 / Assistant',
+        personaLabel: 'AI Persona',
+        personaProfessional: 'Professional',
+        personaCool: 'Cool & Distant',
+        personaUncle: 'Wise Mentor',
+        personaBro: 'Reliable Buddy',
+        personaGirl: 'Cheerful Helper',
+        introLabel: 'One-line intro (optional)',
+        introPlaceholder: 'e.g. I am building a local agent, please keep responses structured.',
+        saveProfileLabel: 'Save profile to memory candidates (confirm/reject later)',
+        wizardStep3: 'Step 3: Usage mode (optional)',
+        usageWebTitle: 'Local Web UI',
+        usageWebDesc: 'Access via browser on this machine (default).',
+        usageTelegramDesc: 'Chat with your agent via Telegram (requires Bot Token setup).',
+        usageLanTitle: 'Local network',
+        usageLanDesc: 'Access from other devices on the same network (requires firewall config).',
+      },
+    };
+
+    function tr(key){
+      return (I18N[state.language] && I18N[state.language][key]) || I18N.en[key] || key;
+    }
+
+    function detectBrowserLanguage(){
+      const langs = Array.from(navigator.languages || []);
+      if (navigator.language) langs.unshift(navigator.language);
+      const text = langs.join(' ').toLowerCase();
+      return /(^|\s)zh|zh-/.test(text) ? 'zh' : 'en';
+    }
+
+    function setText(selector, text){
+      const el = typeof selector === 'string' ? document.querySelector(selector) : selector;
+      if (el) el.textContent = text;
+    }
+
+    function setPlaceholder(id, text){
+      const el = $(id);
+      if (el) el.placeholder = text;
+    }
+
+    function setOptionText(selectId, value, text){
+      const opt = document.querySelector(`#${selectId} option[value="${value}"]`);
+      if (opt) opt.textContent = text;
+    }
+
+    function applyLanguage(language){
+      state.language = language === 'zh' ? 'zh' : 'en';
+      document.documentElement.lang = state.language === 'zh' ? 'zh' : 'en';
+      $('systemLanguage').value = state.language;
+      $('setupLanguage').value = state.language;
+      setText('#stopBtn', tr('stop'));
+      setText('#openSettings', tr('settings'));
+      setText('#closeSettings', tr('close'));
+      setText('#statusText', tr('idle'));
+      setText('#newlineBtn span:first-child', tr('newline'));
+      setText('#sendBtn span:first-child', tr('send'));
+      setText('.sheet-head h2', tr('settingsTitle'));
+      setText('#hostedQuickTitle', tr('hostedPanelTitle'));
+      setText('#hostedQuickHelp', tr('hostedQuickHelp'));
+      setText('#openHostedSetup', tr('hostedQuickButton'));
+      setText('#versionSectionTitle', tr('versionTitle'));
+      setText('#checkVersion', tr('checkUpdate'));
+      setText('#openDownload', tr('downloadLatest'));
+      setText('#modelSectionTitle', tr('modelTitle'));
+      setText('#saveModel', tr('switchModel'));
+      setText('#openSetup', tr('setupAgain'));
+      setText('#modelSectionTitle + .row + .muted', tr('modelHelp'));
+      setText('#routeSectionTitle', tr('routeTitle'));
+      setText('#saveRoute', tr('save'));
+      setText('#validateKey', tr('validate'));
+      setText('#saveKey', tr('saveKey'));
+      setPlaceholder('apiKey', tr('apiKeyPlaceholder'));
+      setText('#languageSectionTitle', tr('languageTitle'));
+      setText('#saveUiMode', tr('save'));
+      setText('#languageSectionTitle + .row + .muted', tr('uiModeHelp'));
+      setText('#saveLanguage', tr('save'));
+      setText('#savePermissionScope', tr('save'));
+      setText('#saveTerminalAccess', tr('save'));
+      setText('#saveCalendarAccess', tr('save'));
+      setOptionText('uiMode', 'companion', tr('companionMode'));
+      setOptionText('uiMode', 'capsule', tr('capsuleMode'));
+      setOptionText('permissionScope', 'workspace', tr('workspaceOnly'));
+      setOptionText('permissionScope', 'full_computer', tr('fullComputer'));
+      setOptionText('terminalAccess', 'disabled', tr('terminalOff'));
+      setOptionText('terminalAccess', 'enabled', tr('terminalOn'));
+      setOptionText('calendarAccess', 'disabled', tr('calendarOff'));
+      setOptionText('calendarAccess', 'enabled', tr('calendarOn'));
+      setText('#workspaceSectionTitle', tr('workspaceTitle'));
+      setText('#workspaceSectionTitle + .muted', tr('workspaceHelp'));
+      setPlaceholder('workspacePath', tr('workspacePlaceholder'));
+      setText('#pickFolder', tr('choose'));
+      setText('#saveWorkspace', tr('authorize'));
+      setText('#uploadSectionTitle', tr('uploadTitle'));
+      setText('#upload', tr('upload'));
+      setText('#memorySectionTitle', tr('memoryTitle'));
+      setText('#memorySectionTitle + .muted', tr('memoryHelp'));
+      setText('#logsSectionTitle', tr('logsTitle'));
+      setText('#refreshLogs', tr('refresh'));
+      setText('#folderOverlay h3', tr('folderTitle'));
+      setText('#folderUp', tr('parent'));
+      setText('#folderUse', tr('useFolder'));
+      setText('#folderClose', tr('close'));
+      setText('#folderOverlay .modal-card > .muted:last-child', tr('folderHelp'));
+      setText('.wizard-title h2', tr('firstSetup'));
+      setText('.wizard-title p', tr('setupSubtitle'));
+      setText('#wizardClose', tr('setupLater'));
+      setText('.wizard-body > .hint', tr('setupStep1'));
+      setText('[data-mode="own_api"] strong', tr('ownApi'));
+      setText('[data-mode="own_api"] span', tr('ownApiDesc'));
+      setText('[data-mode="local_model"] strong', tr('localModel'));
+      setText('[data-mode="local_model"] span', tr('localModelDesc'));
+      setText('[data-mode="hosted_api"] strong', tr('hostedApi'));
+      setText('[data-mode="hosted_api"] span', tr('hostedApiDesc'));
+      const labels = Array.from(document.querySelectorAll('.wizard .field label'));
+      if (labels[0]) labels[0].textContent = tr('modelLabel');
+      if (labels[1]) labels[1].textContent = tr('languageLabel');
+      if (labels[2]) labels[2].textContent = tr('providerLabel');
+      if (labels[5]) labels[5].textContent = tr('hostedRegion');
+      if (labels[6]) labels[6].textContent = tr('hostedUrl');
+      if (labels[7]) labels[7].textContent = tr('email');
+      if (labels[8]) labels[8].textContent = tr('password');
+      setText('#setupValidateKey', tr('validate'));
+      setText('#wizardFinish', tr('finishSetup'));
+      setText('#hostedPanelTitle', tr('hostedPanelTitle'));
+      setText('#hostedRegionLabel', tr('hostedRegionLabel'));
+      setOptionText('setupHostedRegion', 'auto', tr('hostedRegionAuto'));
+      setOptionText('setupHostedRegion', 'global', tr('hostedRegionGlobal'));
+      setOptionText('setupHostedRegion', 'cn', tr('hostedRegionCn'));
+      setText('#hostedUrlLabel', tr('hostedUrlLabel'));
+      setText('#hostedEmailLabel', tr('hostedEmailLabel'));
+      setText('#hostedPasswordLabel', tr('hostedPasswordLabel'));
+      setPlaceholder('setupHostedPassword', tr('hostedPasswordPlaceholder'));
+      setText('#hostedNoAccountText', tr('hostedNoAccount'));
+      setText('#hostedRegisterLink', tr('hostedRegister'));
+      setText('#setupHostedLogin', tr('hostedLoginBtn'));
+      setText('#wizardStep2Hint', tr('wizardStep2'));
+      setText('#setupFileScopeLabel', tr('fileScopeLabel'));
+      setText('#setupTerminalLabel', tr('terminalLabel'));
+      setOptionText('setupPermissionScope', 'workspace', tr('workspaceOnly'));
+      setOptionText('setupPermissionScope', 'full_computer', tr('fullComputer'));
+      setOptionText('setupTerminalAccess', 'disabled', tr('setupTerminalOff'));
+      setOptionText('setupTerminalAccess', 'enabled', tr('setupTerminalOn'));
+      setText('#setupAgentNameLabel', tr('agentNameLabel'));
+      setPlaceholder('setupAgentName', tr('agentNamePlaceholder'));
+      setText('#setupPersonaLabel', tr('personaLabel'));
+      setOptionText('setupPersona', 'professional', tr('personaProfessional'));
+      setOptionText('setupPersona', 'cool', tr('personaCool'));
+      setOptionText('setupPersona', 'uncle', tr('personaUncle'));
+      setOptionText('setupPersona', 'bro', tr('personaBro'));
+      setOptionText('setupPersona', 'girl', tr('personaGirl'));
+      setText('#setupIntroLabel', tr('introLabel'));
+      setPlaceholder('setupUserIntro', tr('introPlaceholder'));
+      setText('#setupSaveProfileLabel', tr('saveProfileLabel'));
+      setText('#wizardStep3Hint', tr('wizardStep3'));
+      setText('#usageWebTitle', tr('usageWebTitle'));
+      setText('#usageWebDesc', tr('usageWebDesc'));
+      setText('#usageTelegramDesc', tr('usageTelegramDesc'));
+      setText('#usageLanTitle', tr('usageLanTitle'));
+      setText('#usageLanDesc', tr('usageLanDesc'));
+      setText('#permissionTitle', state.language === 'zh' ? '需要权限' : 'Permission required');
+      setText('#permissionText', state.language === 'zh' ? '这个任务需要额外权限。是否授权？' : 'This task needs additional permission. Allow it?');
+      setText('#permNo', state.language === 'zh' ? '拒绝' : 'Deny');
+      setText('#permOnce', state.language === 'zh' ? '仅本次' : 'This time');
+      setText('#permAlways', state.language === 'zh' ? '始终允许' : 'Always allow');
+      setComposerHintForChoice();
+    }
 
     function setComposerHintForChoice(){
       const hasChoice = !!state.awaitingChoice;
       const hasConfirm = !!state.awaitingConfirm;
       $('message').placeholder = hasChoice
-        ? '请选择一个选项（也可以直接点下面的按钮）…'
-        : (hasConfirm ? '请确认执行还是取消（也可以点下面的按钮）…' : '像对一个伙伴下指令：例如“读取 test_prd.md 并生成总结”');
+        ? tr('choiceComposer')
+        : (hasConfirm ? tr('confirmComposer') : tr('composer'));
     }
 
     function setBusy(on){
       document.body.classList.toggle('busy', !!on);
-      $('statusText').textContent = on ? '处理中…' : '待命';
-      $('coreLabel').textContent = on ? 'THINKING' : 'READY';
+      $('statusText').textContent = on ? tr('thinking') : tr('idle');
+      $('coreLabel').textContent = on ? tr('thinkingCore') : tr('readyCore');
       $('coreLabel').style.opacity = on ? '1' : '0';
       $('sendBtn').disabled = !!on;
       $('stopBtn').disabled = !on;
@@ -1335,7 +1797,7 @@
       if (files && files.length){
         const meta = document.createElement('div');
         meta.className = 'meta';
-        meta.innerHTML = '<span>输出文件：</span>' + files.map(u => `<a class="file" href="${esc(u)}" target="_blank" rel="noopener">${esc(u.split('/').pop())}</a>`).join(' · ');
+        meta.innerHTML = `<span>${esc(tr('outputFiles'))}</span>` + files.map(u => `<a class="file" href="${esc(u)}" target="_blank" rel="noopener">${esc(u.split('/').pop())}</a>`).join(' · ');
         $('messages').appendChild(meta);
       }
       requestAnimationFrame(() => $('messages').scrollTo({top: $('messages').scrollHeight, behavior: 'smooth'}));
@@ -1366,15 +1828,48 @@
     }
 
     // ====== API ======
+    function _extractError(text){
+      try { const j = JSON.parse(text); return j.detail || j.message || j.error || text; } catch(e){ return text; }
+    }
     async function apiGet(path){
       const r = await fetch(path);
-      if (!r.ok) throw new Error(await r.text());
+      if (!r.ok) throw new Error(_extractError(await r.text()));
       return await r.json();
     }
     async function apiPost(path, body){
       const r = await fetch(path, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body || {}), signal: state.aborter?.signal});
-      if (!r.ok) throw new Error(await r.text());
+      if (!r.ok) throw new Error(_extractError(await r.text()));
       return await r.json();
+    }
+
+    let latestDownloadUrl = null;
+    async function loadVersionStatus(){
+      setText('#versionSummary', tr('checkingVersion'));
+      setText('#versionDetail', '');
+      try{
+        const info = await apiGet('/api/version/check');
+        latestDownloadUrl = info.download_url || null;
+        const current = info.version || '-';
+        const latest = info.latest_version || '-';
+        setText('#versionSummary', `${tr('versionCurrent')}: ${current} · ${tr('versionLatest')}: ${latest}`);
+        if (info.update_available) {
+          setText('#versionDetail', tr('updateAvailable'));
+          $('versionDetail').className = 'status good';
+        } else if (info.source === 'error') {
+          setText('#versionDetail', tr('updateUnknown'));
+          $('versionDetail').className = 'status bad';
+        } else {
+          setText('#versionDetail', tr('updateCurrent'));
+          $('versionDetail').className = 'status good';
+        }
+        $('openDownload').disabled = !latestDownloadUrl;
+      }catch(e){
+        latestDownloadUrl = null;
+        setText('#versionSummary', tr('updateUnknown'));
+        setText('#versionDetail', e?.message || String(e));
+        $('versionDetail').className = 'status bad';
+        $('openDownload').disabled = true;
+      }
     }
 
     // ====== Chat flow ======
@@ -1562,17 +2057,19 @@
       // models
       const mSel = $('model');
       mSel.innerHTML = '';
-      (modelInfo.available || []).forEach(m => {
+      const models = (modelInfo.available && modelInfo.available.length ? modelInfo.available : DEFAULT_MODELS);
+      models.forEach(m => {
         const opt = document.createElement('option');
         opt.value = m; opt.textContent = m;
         if (m === modelInfo.model) opt.selected = true;
         mSel.appendChild(opt);
       });
+      if (!mSel.value && mSel.options.length) mSel.selectedIndex = 0;
 
       // route
       const rSel = $('route');
       rSel.innerHTML = '';
-      (routeInfo.available || []).forEach(r => {
+      (routeInfo.available && routeInfo.available.length ? routeInfo.available : ['proxy', 'byo', 'local']).forEach(r => {
         const opt = document.createElement('option');
         opt.value = r; opt.textContent = r;
         if (r === routeInfo.route) opt.selected = true;
@@ -1582,7 +2079,7 @@
       // providers
       const pSel = $('provider');
       pSel.innerHTML = '';
-      (keysInfo.providers || []).forEach(p => {
+      (keysInfo.providers && keysInfo.providers.length ? keysInfo.providers : DEFAULT_PROVIDERS).forEach(p => {
         const opt = document.createElement('option');
         opt.value = p; opt.textContent = p;
         pSel.appendChild(opt);
@@ -1590,8 +2087,8 @@
 
       // language & permissions
       $('uiMode').value = state.mode === 'capsule' ? 'capsule' : 'companion';
-      $('systemLanguage').value = langInfo.language || 'zh';
-      $('permissionScope').value = permInfo.scope || 'workspace';
+      applyLanguage(langInfo.language || state.language || detectBrowserLanguage());
+      $('permissionScope').value = permInfo.scope || 'full_computer';
       $('terminalAccess').value = termInfo.access || 'enabled';
       $('calendarAccess').value = calInfo.access || 'disabled';
       $('workspacePath').value = wsInfo.workspace || '';
@@ -1609,7 +2106,7 @@
       if (!items.length){
         const div = document.createElement('div');
         div.className = 'muted';
-        div.textContent = '暂无候选记忆。';
+        div.textContent = tr('noMemories');
         wrap.appendChild(div);
         return;
       }
@@ -1636,6 +2133,8 @@
           await apiPost(`/api/memories/${encodeURIComponent(item.id)}/reject`, {});
           await refreshMemories();
         };
+        card.querySelector('[data-act="confirm"]').textContent = tr('confirm');
+        card.querySelector('[data-act="reject"]').textContent = tr('reject');
         wrap.appendChild(card);
       });
     }
@@ -1648,7 +2147,7 @@
       if (!items.length){
         const div = document.createElement('div');
         div.className = 'muted';
-        div.textContent = '暂无日志。';
+        div.textContent = tr('noLogs');
         wrap.appendChild(div);
         return;
       }
@@ -1663,7 +2162,7 @@
             <div style="font-weight:650">${tool} <span class="muted" style="font-weight:500">(${status})</span></div>
             <div class="muted" style="margin-top:4px;font-family:var(--mono);font-size:11px">${t}</div>
           </div>
-          <button class="ghost" type="button">详情</button>
+          <button class="ghost" type="button">${esc(tr('details'))}</button>
         </div>
         <pre style="display:none;margin:10px 0 0;white-space:pre-wrap;word-break:break-word;color:rgba(234,240,255,.78);font-family:var(--mono);font-size:11px;line-height:1.45"></pre>`;
         const pre = card.querySelector('pre');
@@ -1713,6 +2212,48 @@
     // ====== Onboarding (install UI) ======
     function openWizard(){ $('wizardOverlay').classList.add('open'); }
     function closeWizard(){ $('wizardOverlay').classList.remove('open'); }
+    function shouldForceSetup(){
+      try {
+        return new URLSearchParams(window.location.search).get('setup') === '1';
+      } catch(e) {
+        return false;
+      }
+    }
+    function applyTrialDefaults(){
+      try {
+        state.mode = 'companion';
+        $('uiMode').value = 'companion';
+        $('systemLanguage').value = 'en';
+        $('setupLanguage').value = 'en';
+        $('permissionScope').value = 'full_computer';
+        $('setupPermissionScope').value = 'full_computer';
+        $('terminalAccess').value = 'enabled';
+        $('setupTerminalAccess').value = 'enabled';
+        $('calendarAccess').value = 'disabled';
+        $('setupHostedRegion').value = 'auto';
+        $('setupHostedUrl').value = DEFAULT_HOSTED_API_BASE;
+        applyLanguage('en');
+      } catch(e) {}
+    }
+    async function persistTrialDefaults(){
+      await Promise.allSettled([
+        apiPost('/api/language', {language: 'en'}),
+        apiPost('/api/permission-scope', {scope: 'full_computer'}),
+        apiPost('/api/terminal-access', {access: 'enabled'}),
+        apiPost('/api/calendar-access', {access: 'disabled'}),
+        apiPost('/api/hosted-region', {region: 'auto'}),
+      ]);
+    }
+    function forceOpenSetupWizard(){
+      try {
+        applyTrialDefaults();
+        setModeCards('hosted_api');
+        $('setupHostedUrl').value = $('setupHostedUrl').value || DEFAULT_HOSTED_API_BASE;
+        openWizard();
+      } catch(e) {
+        setTimeout(forceOpenSetupWizard, 50);
+      }
+    }
 
     function setModeCards(mode){
       document.querySelectorAll('#modeGrid .card-choice').forEach(el => {
@@ -1729,27 +2270,34 @@
         apiGet('/api/api-keys'),
       ]);
       const completed = !!onb.completed;
-      // prefill
-      $('setupLanguage').value = onb.system_language || 'zh';
-      $('setupPermissionScope').value = onb.permission_scope || 'workspace';
-      $('setupTerminalAccess').value = onb.terminal_access || 'enabled';
+      if (completed) localStorage.setItem('auctus.setup_done', '1');
+      // only use saved language if explicitly configured; otherwise fall through to
+      // the value set by applyTrialDefaults() or browser detection
+      const savedLang = onb.system_language_configured ? onb.system_language : null;
+      applyLanguage(savedLang || state.language || detectBrowserLanguage());
+      // When forceSetup, always show correct defaults regardless of stale DB values
+      const isForce = shouldForceSetup();
+      $('setupPermissionScope').value = isForce ? 'full_computer' : (onb.permission_scope || 'full_computer');
+      $('setupTerminalAccess').value = isForce ? 'enabled' : (onb.terminal_access || 'enabled');
       $('setupHostedRegion').value = onb.hosted_region || 'auto';
-      $('setupHostedUrl').value = onb.hosted_base_url || 'http://localhost:8001';
+      $('setupHostedUrl').value = onb.hosted_base_url || DEFAULT_HOSTED_API_BASE;
       $('setupAgentName').value = onb.agent_name || '';
       $('setupPersona').value = onb.persona || 'professional';
 
       const mSel = $('setupModel');
       mSel.innerHTML = '';
-      (modelInfo.available || []).forEach(m => {
+      const models = (modelInfo.available && modelInfo.available.length ? modelInfo.available : DEFAULT_MODELS);
+      models.forEach(m => {
         const opt = document.createElement('option');
         opt.value = m; opt.textContent = m;
         if (m === (onb.model || modelInfo.model)) opt.selected = true;
         mSel.appendChild(opt);
       });
+      if (!mSel.value && mSel.options.length) mSel.selectedIndex = 0;
 
       const pSel = $('setupProvider');
       pSel.innerHTML = '';
-      (keysInfo.providers || []).forEach(p => {
+      (keysInfo.providers && keysInfo.providers.length ? keysInfo.providers : DEFAULT_PROVIDERS).forEach(p => {
         const opt = document.createElement('option');
         opt.value = p; opt.textContent = p;
         pSel.appendChild(opt);
@@ -1771,11 +2319,27 @@
         }
       } catch(e) {}
 
-      const mode = (onb.mode || 'own_api').trim() || 'own_api';
+      const mode = (onb.mode || 'hosted_api').trim() || 'hosted_api';
       setModeCards(mode);
       $('wizardError').textContent = '';
 
-      if (!completed) openWizard();
+      if (!completed || shouldForceSetup()) openWizard();
+    }
+
+    async function initLanguage(){
+      try{
+        const langInfo = await apiGet('/api/language');
+        let language = langInfo.language || 'en';
+        if (!langInfo.configured){
+          // When forceSetup (?setup=1) always default to English so the wizard
+          // is readable; otherwise detect from browser for returning users.
+          language = shouldForceSetup() ? 'en' : detectBrowserLanguage();
+          await apiPost('/api/language', {language});
+        }
+        applyLanguage(language);
+      }catch(e){
+        applyLanguage(shouldForceSetup() ? 'en' : detectBrowserLanguage());
+      }
     }
 
     async function validateKey(provider, apiKey, model, statusId){
@@ -1796,7 +2360,7 @@
       // For hosted_api, ensure we have a valid session
       if (mode === 'hosted_api') {
         if (!hostedSession || !hostedSession.token) {
-          $('wizardError').textContent = '请先登录 Auctus 托管 API 账号。';
+          $('wizardError').textContent = tr('needHostedLogin');
           return;
         }
       }
@@ -1821,29 +2385,32 @@
       $('wizardError').textContent = '';
       if (mode === 'own_api'){
         if (!payload.provider || !payload.api_key){
-          $('wizardError').textContent = '请填写 Provider 和 API key。';
+          $('wizardError').textContent = tr('needProviderKey');
           return;
         }
         const ok = await validateKey(payload.provider, payload.api_key, payload.model, 'setupKeyStatus');
         if (!ok) return;
       }
       if (mode === 'hosted_api' && !payload.hosted_email){
-        $('wizardError').textContent = '请填写登录邮箱。';
+        $('wizardError').textContent = tr('needEmail');
         return;
       }
 
       try{
         $('wizardFinish').disabled = true;
-        $('wizardFinish').textContent = '保存中…';
+        $('wizardFinish').textContent = tr('saving');
         await apiPost('/api/onboarding', payload);
+        localStorage.setItem('auctus.setup_done', '1');
+        applyLanguage(payload.system_language || state.language);
         closeWizard();
         chime();
+        addBubble('agent', tr('setupDone'));
         await refreshSettings().catch(()=>{});
       }catch(e){
-        $('wizardError').textContent = '保存失败：' + (e?.message || String(e));
+        $('wizardError').textContent = tr('languageSaveFailed') + (e?.message || String(e));
       }finally{
         $('wizardFinish').disabled = false;
-        $('wizardFinish').textContent = '完成设置';
+        $('wizardFinish').textContent = tr('finishSetup');
       }
     }
 
@@ -1860,18 +2427,30 @@
     $('stopBtn').disabled = true;
 
     $('openSettings').onclick = openSettings;
+    $('shutdownBtn').onclick = async () => {
+      if (!confirm('确定要关闭 Auctus Agent 吗？\n关闭后需要重新运行 Start 脚本才能使用。')) return;
+      $('shutdownBtn').disabled = true;
+      $('shutdownBtn').textContent = '关闭中…';
+      try { await fetch('/api/shutdown', { method: 'POST' }); } catch {}
+      document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;color:#aaa;font-size:18px;">Auctus Agent 已关闭。重新启动请双击 Start 文件。</div>';
+    };
     $('closeSettings').onclick = closeSettings;
     $('backdrop').onclick = closeSettings;
 
     $('message').addEventListener('input', () => autoGrow($('message')));
     $('chatForm').addEventListener('submit', (e) => { e.preventDefault(); if (!$('sendBtn').disabled) sendMessage($('message').value); });
-    // 回车发送；Shift+Enter 换行
+    // Enter 发送；Shift+Enter 换行
+    // macOS 上 compositionend 可能在独立 task 触发，早于 keydown，
+    // 用时间戳记录结束时刻，50ms 内的 Enter 视为输入法确认键，不发送。
+    let imeComposing = false;
+    let lastCompositionEnd = 0;
+    $('message').addEventListener('compositionstart', () => { imeComposing = true; });
+    $('message').addEventListener('compositionend', () => { imeComposing = false; lastCompositionEnd = Date.now(); });
     $('message').addEventListener('keydown', (e) => {
       if (e.key !== 'Enter') return;
-      // 允许 Shift+Enter 换行
+      if (e.isComposing || imeComposing) return;
+      if (Date.now() - lastCompositionEnd < 50) return;
       if (e.shiftKey) return;
-      // 中文输入法合成中不发送
-      if (e.isComposing) return;
       e.preventDefault();
       if (!$('sendBtn').disabled) sendMessage($('message').value);
     });
@@ -1895,9 +2474,15 @@
     $('permAlways').onclick = () => resolvePermission('always');
 
     // settings actions
+    $('checkVersion').onclick = () => loadVersionStatus();
+    $('openDownload').onclick = () => {
+      if (latestDownloadUrl) window.open(latestDownloadUrl, '_blank', 'noopener');
+    };
     $('saveModel').onclick = async () => {
       try{
-        await apiPost('/api/model', {model: $('model').value});
+        const model = $('model').value || DEFAULT_MODELS[0];
+        if (!model){ setStatus('keyStatus', '请先选择模型。', 'bad'); return; }
+        await apiPost('/api/model', {model});
         setStatus('keyStatus', '已切换模型。', 'good');
       }catch(e){ setStatus('keyStatus', '切换失败：' + (e?.message || String(e)), 'bad'); }
     };
@@ -1924,9 +2509,20 @@
     };
     $('saveLanguage').onclick = async () => {
       try{
-        await apiPost('/api/language', {language: $('systemLanguage').value});
-        setStatus('permissionStatus', '语言已保存。', 'good');
-      }catch(e){ setStatus('permissionStatus', '保存失败：' + (e?.message || String(e)), 'bad'); }
+        const out = await apiPost('/api/language', {language: $('systemLanguage').value});
+        applyLanguage(out.language || $('systemLanguage').value);
+        setStatus('permissionStatus', tr('languageSaved'), 'good');
+      }catch(e){ setStatus('permissionStatus', tr('languageSaveFailed') + (e?.message || String(e)), 'bad'); }
+    };
+    $('systemLanguage').onchange = () => applyLanguage($('systemLanguage').value);
+    $('setupLanguage').onchange = () => applyLanguage($('setupLanguage').value);
+    $('openSetup').onclick = () => openWizard();
+    $('openHostedSetup').onclick = async () => {
+      closeSettings();
+      await initWizard().catch(()=>{});
+      setModeCards('hosted_api');
+      $('setupHostedUrl').value = $('setupHostedUrl').value || DEFAULT_HOSTED_API_BASE;
+      openWizard();
     };
     $('saveUiMode').onclick = () => {
       state.mode = $('uiMode').value === 'capsule' ? 'capsule' : 'companion';
@@ -2171,7 +2767,7 @@
     async function hostedLogin() {
       const email = $('setupHostedEmail').value.trim();
       const password = $('setupHostedPassword').value;
-      const baseUrl = ($('setupHostedUrl').value || 'http://localhost:8001').replace(/\/$/, '');
+      const baseUrl = ($('setupHostedUrl').value || DEFAULT_HOSTED_API_BASE).replace(/\/$/, '');
       const region = $('setupHostedRegion').value;
 
       if (!email || !password) {
@@ -2181,76 +2777,26 @@
 
       setStatus('hostedLoginStatus', '登录中…', '');
       try {
-        // Login to get token
-        const formData = new URLSearchParams();
-        formData.append('username', email);
-        formData.append('password', password);
-
-        const loginRes = await fetch(`${baseUrl}/auth/login`, {
+        const loginRes = await fetch('/api/hosted-login', {
           method: 'POST',
-          headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-          body: formData.toString()
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({base_url: baseUrl, email, password, region})
         });
-
         if (!loginRes.ok) {
           const err = await loginRes.json().catch(() => ({}));
-          throw new Error(err.detail || '登录失败，请检查邮箱和密码。');
+          throw new Error(err.detail || '登录失败');
         }
-
-        const {access_token} = await loginRes.json();
-
-        // Get billing status
-        const billingRes = await fetch(`${baseUrl}/subscriptions/billing-status`, {
-          headers: {'Authorization': `Bearer ${access_token}`}
-        });
-        const billing = billingRes.ok ? await billingRes.json() : {};
-
-        // Get or create API key
-        const keysRes = await fetch(`${baseUrl}/api-keys/`, {
-          headers: {'Authorization': `Bearer ${access_token}`}
-        });
-        let apiKey = null;
-        if (keysRes.ok) {
-          const keys = await keysRes.json();
-          const activeKey = keys.find(k => k.status === 'active');
-          if (activeKey) {
-            // Need to get full key - create new one
-            const createRes = await fetch(`${baseUrl}/api-keys/`, {
-              method: 'POST',
-              headers: {
-                'Authorization': `Bearer ${access_token}`,
-                'Content-Type': 'application/json'
-              },
-              body: JSON.stringify({name: 'Auctus Agent'})
-            });
-            if (createRes.ok) {
-              const newKey = await createRes.json();
-              apiKey = newKey.key;
-            }
-          }
-        }
-
-        if (!apiKey) {
-          // Create a new key
-          const createRes = await fetch(`${baseUrl}/api-keys/`, {
-            method: 'POST',
-            headers: {
-              'Authorization': `Bearer ${access_token}`,
-              'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({name: 'Auctus Agent'})
-          });
-          if (!createRes.ok) throw new Error('无法创建 API Key');
-          const newKey = await createRes.json();
-          apiKey = newKey.key;
-        }
+        const session = await loginRes.json();
+        const billing = session.billing || {};
+        const access_token = session.token;
+        const apiKey = session.api_key;
 
         hostedSession = {
           token: access_token,
-          email,
+          email: session.email || email,
           api_key: apiKey,
-          base_url: baseUrl,
-          region
+          base_url: session.base_url || baseUrl,
+          region: session.region || region
         };
 
         // Update UI
@@ -2272,7 +2818,7 @@
 
     $('hostedRegisterLink').onclick = (e) => {
       e.preventDefault();
-      const baseUrl = ($('setupHostedUrl').value || 'http://localhost:8001').replace(/\/$/, '');
+      const baseUrl = ($('setupHostedUrl').value || DEFAULT_HOSTED_API_BASE).replace(/\/$/, '');
       window.open(`${baseUrl}/static/dashboard.html`, '_blank');
     };
 
@@ -2333,20 +2879,191 @@
     // Initialize usage mode info
     updateUsageModeInfo();
 
+    async function clearOldPwaShell(){
+      const hasServiceWorker = 'serviceWorker' in navigator;
+      const controlled = !!(hasServiceWorker && navigator.serviceWorker.controller);
+      try {
+        if (hasServiceWorker) {
+          const registrations = await navigator.serviceWorker.getRegistrations();
+          await Promise.all(registrations.map(reg => reg.unregister()));
+        }
+        if ('caches' in window) {
+          const keys = await caches.keys();
+          await Promise.all(keys.map(key => caches.delete(key)));
+        }
+      } catch(e) {}
+
+      if (controlled && sessionStorage.getItem('auctus.sw.cleaned') !== '1') {
+        sessionStorage.setItem('auctus.sw.cleaned', '1');
+        window.location.reload();
+        await new Promise(() => {});
+      }
+    }
+
     // boot
     (async function boot(){
+      const forceSetup = shouldForceSetup();
+      if (forceSetup) forceOpenSetupWizard();
       try{
+        await clearOldPwaShell();
+        if (forceSetup) forceOpenSetupWizard();
+        if (forceSetup) await persistTrialDefaults();
+        await initLanguage();
+        await loadVersionStatus();
+        if (forceSetup) forceOpenSetupWizard();
         await initWizard();
+        if (forceSetup) forceOpenSetupWizard();
         // preload folder picker state
         const j = await apiGet('/api/folders');
         folderState.path = j.path; folderState.parent = j.parent;
-      }catch(e){}
+      }catch(e){
+        const setupDone = localStorage.getItem('auctus.setup_done') === '1';
+        if (forceSetup || !setupDone) {
+          forceOpenSetupWizard();
+          if (forceSetup) $('wizardError').textContent = '设置页初始化未完全完成，但可以继续登录托管 API。';
+        }
+      }
+      if (forceSetup) forceOpenSetupWizard();
       // initial greeting
-      addBubble('agent', '你好，我在这里。把任务交给我吧。你也可以打开右上角 ⚙ 设置，完成模型与权限配置。');
+      addBubble('agent', tr('greeting'));
       $('message').focus();
       autoGrow($('message'));
       setComposerHintForChoice();
+      // init drag & drop
+      initDragDrop();
     })();
+
+    // ── Drag & Drop File Upload ──────────────────────────────────────────────
+    function initDragDrop() {
+      const dropZone = document.body;
+      const messagesEl = $('messages');
+      let dragCounter = 0;
+      let isDragging = false;
+
+      // Create drop overlay
+      const dropOverlay = document.createElement('div');
+      dropOverlay.id = 'dropOverlay';
+      dropOverlay.style.cssText = `
+        position: fixed;
+        top: 0; left: 0; right: 0; bottom: 0;
+        background: rgba(45, 124, 255, 0.15);
+        backdrop-filter: blur(8px);
+        -webkit-backdrop-filter: blur(8px);
+        display: none;
+        align-items: center;
+        justify-content: center;
+        z-index: 9999;
+        pointer-events: none;
+      `;
+      dropOverlay.innerHTML = `
+        <div style="
+          background: var(--panel);
+          border: 2px dashed var(--accent);
+          border-radius: 24px;
+          padding: 48px 64px;
+          text-align: center;
+        ">
+          <div style="font-size: 48px; margin-bottom: 16px;">📁</div>
+          <div style="font-size: 20px; font-weight: 600; color: var(--text);">释放文件以上传</div>
+          <div style="font-size: 14px; color: var(--muted); margin-top: 8px;">文件将被保存到 inputs/ 目录</div>
+        </div>
+      `;
+      document.body.appendChild(dropOverlay);
+
+      // Prevent default drag behaviors
+      ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+        dropZone.addEventListener(eventName, preventDefaults, false);
+      });
+
+      function preventDefaults(e) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+
+      // Handle drag enter/leave for overlay
+      dropZone.addEventListener('dragenter', (e) => {
+        if (e.dataTransfer.types.includes('Files')) {
+          dragCounter++;
+          if (!isDragging) {
+            isDragging = true;
+            dropOverlay.style.display = 'flex';
+          }
+        }
+      });
+
+      dropZone.addEventListener('dragleave', (e) => {
+        dragCounter--;
+        if (dragCounter === 0) {
+          isDragging = false;
+          dropOverlay.style.display = 'none';
+        }
+      });
+
+      dropZone.addEventListener('dragover', (e) => {
+        e.dataTransfer.dropEffect = 'copy';
+      });
+
+      // Handle drop
+      dropZone.addEventListener('drop', async (e) => {
+        isDragging = false;
+        dragCounter = 0;
+        dropOverlay.style.display = 'none';
+
+        const files = e.dataTransfer.files;
+        if (!files || files.length === 0) return;
+
+        // Upload each file
+        for (const file of files) {
+          await uploadDroppedFile(file);
+        }
+      });
+
+      async function uploadDroppedFile(file) {
+        try {
+          // Show uploading message
+          const uploadMsg = document.createElement('div');
+          uploadMsg.className = 'msg agent';
+          uploadMsg.innerHTML = `<div class="bubble"><div class="text">📤 正在上传: ${file.name}...</div></div>`;
+          messagesEl.appendChild(uploadMsg);
+          messagesEl.scrollTop = messagesEl.scrollHeight;
+
+          // Upload file
+          const body = new Uint8Array(await file.arrayBuffer());
+          const r = await fetch('/api/upload?filename=' + encodeURIComponent(file.name), {
+            method: 'POST',
+            body
+          });
+
+          if (!r.ok) throw new Error(await r.text());
+
+          const j = await r.json();
+
+          // Update message to success
+          uploadMsg.innerHTML = `<div class="bubble"><div class="text">✅ 已上传: <strong>${j.filename}</strong> (${formatBytes(j.size)})<br><span style="color:var(--muted)">文件已保存到 inputs/ 目录，可直接在对话中引用。</span></div></div>`;
+
+        } catch (err) {
+          // Show error
+          const errorMsg = document.createElement('div');
+          errorMsg.className = 'msg agent';
+          errorMsg.innerHTML = `<div class="bubble"><div class="text" style="color:var(--bad)">❌ 上传失败: ${err.message}</div></div>`;
+          messagesEl.appendChild(errorMsg);
+          messagesEl.scrollTop = messagesEl.scrollHeight;
+        }
+      }
+
+      function formatBytes(bytes) {
+        if (bytes === 0) return '0 B';
+        const k = 1024;
+        const sizes = ['B', 'KB', 'MB', 'GB'];
+        const i = Math.floor(Math.log(bytes) / Math.log(k));
+        return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+      }
+
+      console.log('[DragDrop] Initialized');
+    }
+
+    // Disable old PWA shell caching so upgrades always show the latest UI.
+    clearOldPwaShell().catch(() => {});
   </script>
 </body>
 </html>
