@@ -23,6 +23,8 @@ def _system_prompt() -> str:
         base = sys_path.read_text(encoding="utf-8")
     else:
         base = "你是用户的私人秘书 Agent。"
+    
+    # Inject current model info so Agent knows what model it's using
     model_info = f"\n\n## 当前配置\n你正在使用 {settings.model} 模型。如果用户问你使用什么模型，请如实回答。"
     return base + model_info
 

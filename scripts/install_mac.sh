@@ -112,17 +112,85 @@ PY
 
 # ── Step 8: Desktop launcher ──────────────────────────────────────────────────
 DESKTOP="$HOME/Desktop"
-LAUNCHER="$DESKTOP/启动 Auctus Agent.command"
+LAUNCHER="$DESKTOP/Auctus Agent"
 
-if [ -d "$DESKTOP" ] && [ ! -f "$LAUNCHER" ]; then
-  cat > "$LAUNCHER" <<LAUNCHER
+if [ -d "$DESKTOP" ]; then
+  # Remove old launcher if exists
+  rm -f "$DESKTOP/启动 Auctus Agent.command" 2>/dev/null || true
+  
+  # Create .app bundle for better icon support
+  APP_BUNDLE="$LAUNCHER.app"
+  rm -rf "$APP_BUNDLE" 2>/dev/null || true
+  mkdir -p "$APP_BUNDLE/Contents/MacOS"
+  mkdir -p "$APP_BUNDLE/Contents/Resources"
+  
+  # Create Info.plist
+  cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>launcher</string>
+    <key>CFBundleName</key>
+    <string>Auctus Agent</string>
+    <key>CFBundleDisplayName</key>
+    <string>Auctus Agent</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.auctus.agent</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+</dict>
+</plist>
+PLIST
+
+  # Create launcher script with wait-for-server
+  cat > "$APP_BUNDLE/Contents/MacOS/launcher" <<LAUNCHER
 #!/usr/bin/env bash
 cd "$PROJECT_DIR"
-command -v open >/dev/null 2>&1 && open "http://127.0.0.1:8000" || true
-scripts/start_mac.sh
+
+# Start server in background
+.venv/bin/uvicorn app.server:app --host 127.0.0.1 --port 8000 &
+SERVER_PID=\$!
+
+# Wait for server to be ready
+echo "Starting Auctus Agent..."
+for i in \$(seq 1 30); do
+  if curl -s http://127.0.0.1:8000/healthz > /dev/null 2>&1; then
+    break
+  fi
+  sleep 0.5
+done
+
+# Open browser
+open "http://127.0.0.1:8000"
+
+# Wait for server
+wait \$SERVER_PID
 LAUNCHER
-  chmod +x "$LAUNCHER"
-  echo "已在桌面创建启动入口：\"启动 Auctus Agent.command\""
+  chmod +x "$APP_BUNDLE/Contents/MacOS/launcher"
+  
+  # Copy icon if exists
+  if [ -f "app/icon.icns" ]; then
+    cp "app/icon.icns" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
+  elif [ -f "app/icon.png" ]; then
+    # Create iconset and convert to icns
+    mkdir -p /tmp/icon.iconset
+    sips -z 16 16 app/icon.png --out /tmp/icon.iconset/icon_16x16.png 2>/dev/null || true
+    sips -z 32 32 app/icon.png --out /tmp/icon.iconset/icon_16x16@2x.png 2>/dev/null || true
+    sips -z 32 32 app/icon.png --out /tmp/icon.iconset/icon_32x32.png 2>/dev/null || true
+    sips -z 64 64 app/icon.png --out /tmp/icon.iconset/icon_32x32@2x.png 2>/dev/null || true
+    sips -z 128 128 app/icon.png --out /tmp/icon.iconset/icon_128x128.png 2>/dev/null || true
+    sips -z 256 256 app/icon.png --out /tmp/icon.iconset/icon_128x128@2x.png 2>/dev/null || true
+    sips -z 256 256 app/icon.png --out /tmp/icon.iconset/icon_256x256.png 2>/dev/null || true
+    sips -z 512 512 app/icon.png --out /tmp/icon.iconset/icon_256x256@2x.png 2>/dev/null || true
+    sips -z 512 512 app/icon.png --out /tmp/icon.iconset/icon_512x512.png 2>/dev/null || true
+    sips -z 1024 1024 app/icon.png --out /tmp/icon.iconset/icon_512x512@2x.png 2>/dev/null || true
+    iconutil -c icns /tmp/icon.iconset -o "$APP_BUNDLE/Contents/Resources/AppIcon.icns" 2>/dev/null || true
+    rm -rf /tmp/icon.iconset
+  fi
+  
+  echo "已在桌面创建启动入口：\"Auctus Agent\""
 fi
 
 echo
