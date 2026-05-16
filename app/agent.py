@@ -20,9 +20,11 @@ PROMPTS_DIR = Path(__file__).parent.parent / "prompts"
 def _system_prompt() -> str:
     sys_path = PROMPTS_DIR / "system.md"
     if sys_path.exists():
-        return sys_path.read_text(encoding="utf-8")
-    return "你是用户的私人秘书 Agent。"
-
+        base = sys_path.read_text(encoding="utf-8")
+    else:
+        base = "你是用户的私人秘书 Agent。"
+    model_info = f"\n\n## 当前配置\n你正在使用 {settings.model} 模型。如果用户问你使用什么模型，请如实回答。"
+    return base + model_info
 
 def _build_messages(session_id: str, user_text: str) -> list[dict]:
     """组装一次完整调用所需的 messages：system + 摘要 + 历史 + 当前。"""
