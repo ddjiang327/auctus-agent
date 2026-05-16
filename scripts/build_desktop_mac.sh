@@ -156,13 +156,49 @@ find "$AGENT_RESOURCES" -name '*.pyc' -delete 2>/dev/null || true
 find "$AGENT_RESOURCES" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
 find "$AGENT_RESOURCES" -name '.DS_Store' -delete 2>/dev/null || true
 
-# ── Step 4: Create icon (placeholder - will use default if not found) ─────────
-# If you have an icon file, place it at app/icon.icns
+# ── Step 4: Create icon ──────────────────────────────────────────────────────
+echo "Creating app icon..."
+RESOURCES_DIR="$APP_BUNDLE/Contents/Resources"
 if [ -f "app/icon.icns" ]; then
-    cp "app/icon.icns" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
+    cp "app/icon.icns" "$RESOURCES_DIR/AppIcon.icns"
     echo "  ✓ Icon added"
+elif [ -f "app/icon.png" ]; then
+    ICON_PYTHON="python3"
+    if [ -x ".venv/bin/python" ]; then
+        ICON_PYTHON=".venv/bin/python"
+    fi
+    ICONSET_DIR="$TMP/icon.iconset"
+    if "$ICON_PYTHON" - "$RESOURCES_DIR/AppIcon.icns" <<'PY' >/dev/null 2>&1
+import sys
+from PIL import Image
+
+img = Image.open("app/icon.png")
+img.save(sys.argv[1], format="ICNS")
+PY
+    then
+        echo "  ✓ Icon generated from app/icon.png"
+    elif command -v sips >/dev/null 2>&1 && command -v iconutil >/dev/null 2>&1; then
+        mkdir -p "$ICONSET_DIR"
+        sips -z 16 16 app/icon.png --out "$ICONSET_DIR/icon_16x16.png" >/dev/null 2>&1
+        sips -z 32 32 app/icon.png --out "$ICONSET_DIR/icon_16x16@2x.png" >/dev/null 2>&1
+        sips -z 32 32 app/icon.png --out "$ICONSET_DIR/icon_32x32.png" >/dev/null 2>&1
+        sips -z 64 64 app/icon.png --out "$ICONSET_DIR/icon_32x32@2x.png" >/dev/null 2>&1
+        sips -z 128 128 app/icon.png --out "$ICONSET_DIR/icon_128x128.png" >/dev/null 2>&1
+        sips -z 256 256 app/icon.png --out "$ICONSET_DIR/icon_128x128@2x.png" >/dev/null 2>&1
+        sips -z 256 256 app/icon.png --out "$ICONSET_DIR/icon_256x256.png" >/dev/null 2>&1
+        sips -z 512 512 app/icon.png --out "$ICONSET_DIR/icon_256x256@2x.png" >/dev/null 2>&1
+        sips -z 512 512 app/icon.png --out "$ICONSET_DIR/icon_512x512.png" >/dev/null 2>&1
+        sips -z 1024 1024 app/icon.png --out "$ICONSET_DIR/icon_512x512@2x.png" >/dev/null 2>&1
+        if iconutil -c icns "$ICONSET_DIR" -o "$RESOURCES_DIR/AppIcon.icns" >/dev/null 2>&1; then
+            echo "  ✓ Icon generated from app/icon.png"
+        else
+            echo "  ⚠ Could not generate .icns from app/icon.png, using default"
+        fi
+    else
+        echo "  ⚠ Could not generate .icns from app/icon.png, using default"
+    fi
 else
-    echo "  ⚠ No icon.icns found, using default"
+    echo "  ⚠ No usable icon source found, using default"
 fi
 
 # ── Step 5: Sign the app (optional) ──────────────────────────────────────────

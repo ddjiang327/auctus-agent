@@ -185,63 +185,47 @@ mkdir -p "$RESOURCES_DIR"
 
 if [ -f "app/icon.png" ]; then
     echo "  Converting icon.png to AppIcon.icns..."
+    ICON_PYTHON="python3"
+    if [ -x ".venv/bin/python" ]; then
+        ICON_PYTHON=".venv/bin/python"
+    fi
     ICONSET_DIR="$TMP/icon.iconset"
-    mkdir -p "$ICONSET_DIR"
-    sips -z 16 16 app/icon.png --out "$ICONSET_DIR/icon_16x16.png" 2>/dev/null || true
-    sips -z 32 32 app/icon.png --out "$ICONSET_DIR/icon_16x16@2x.png" 2>/dev/null || true
-    sips -z 32 32 app/icon.png --out "$ICONSET_DIR/icon_32x32.png" 2>/dev/null || true
-    sips -z 64 64 app/icon.png --out "$ICONSET_DIR/icon_32x32@2x.png" 2>/dev/null || true
-    sips -z 128 128 app/icon.png --out "$ICONSET_DIR/icon_128x128.png" 2>/dev/null || true
-    sips -z 256 256 app/icon.png --out "$ICONSET_DIR/icon_128x128@2x.png" 2>/dev/null || true
-    sips -z 256 256 app/icon.png --out "$ICONSET_DIR/icon_256x256.png" 2>/dev/null || true
-    sips -z 512 512 app/icon.png --out "$ICONSET_DIR/icon_256x256@2x.png" 2>/dev/null || true
-    sips -z 512 512 app/icon.png --out "$ICONSET_DIR/icon_512x512.png" 2>/dev/null || true
-    sips -z 1024 1024 app/icon.png --out "$ICONSET_DIR/icon_512x512@2x.png" 2>/dev/null || true
-    iconutil -c icns "$ICONSET_DIR" -o "$RESOURCES_DIR/AppIcon.icns" 2>/dev/null || cp app/icon.png "$RESOURCES_DIR/AppIcon.icns"
-    rm -rf "$ICONSET_DIR"
-    echo "  ✓ Icon created"
+    if "$ICON_PYTHON" - "$RESOURCES_DIR/AppIcon.icns" <<'PY' >/dev/null 2>&1
+import sys
+from PIL import Image
+
+img = Image.open("app/icon.png")
+img.save(sys.argv[1], format="ICNS")
+PY
+    then
+        echo "  ✓ Icon created"
+    elif command -v sips >/dev/null 2>&1 && command -v iconutil >/dev/null 2>&1; then
+        mkdir -p "$ICONSET_DIR"
+        sips -z 16 16 app/icon.png --out "$ICONSET_DIR/icon_16x16.png" >/dev/null 2>&1 || true
+        sips -z 32 32 app/icon.png --out "$ICONSET_DIR/icon_16x16@2x.png" >/dev/null 2>&1 || true
+        sips -z 32 32 app/icon.png --out "$ICONSET_DIR/icon_32x32.png" >/dev/null 2>&1 || true
+        sips -z 64 64 app/icon.png --out "$ICONSET_DIR/icon_32x32@2x.png" >/dev/null 2>&1 || true
+        sips -z 128 128 app/icon.png --out "$ICONSET_DIR/icon_128x128.png" >/dev/null 2>&1 || true
+        sips -z 256 256 app/icon.png --out "$ICONSET_DIR/icon_128x128@2x.png" >/dev/null 2>&1 || true
+        sips -z 256 256 app/icon.png --out "$ICONSET_DIR/icon_256x256.png" >/dev/null 2>&1 || true
+        sips -z 512 512 app/icon.png --out "$ICONSET_DIR/icon_256x256@2x.png" >/dev/null 2>&1 || true
+        sips -z 512 512 app/icon.png --out "$ICONSET_DIR/icon_512x512.png" >/dev/null 2>&1 || true
+        sips -z 1024 1024 app/icon.png --out "$ICONSET_DIR/icon_512x512@2x.png" >/dev/null 2>&1 || true
+        if iconutil -c icns "$ICONSET_DIR" -o "$RESOURCES_DIR/AppIcon.icns" >/dev/null 2>&1; then
+            echo "  ✓ Icon created"
+        else
+            echo "  Warning: Could not create .icns; package will use the default app icon"
+        fi
+        rm -rf "$ICONSET_DIR"
+    else
+        echo "  Warning: Could not create .icns; package will use the default app icon"
+    fi
 else
     echo "  Warning: app/icon.png not found"
 fi
 find "$AGENT_RESOURCES" -name '*.pyc' -delete 2>/dev/null || true
 find "$AGENT_RESOURCES" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
 find "$AGENT_RESOURCES" -name '.DS_Store' -delete 2>/dev/null || true
-
-# ── Step 2.5: Create and copy app icon ────────────────────────────────────────
-echo "Creating app icon..."
-RESOURCES_DIR="$APP_BUNDLE/Contents/Resources"
-mkdir -p "$RESOURCES_DIR"
-
-# Check if icon.png exists in app folder
-if [ -f "app/icon.png" ]; then
-    echo "  Converting icon.png to AppIcon.icns..."
-    # Create temporary iconset directory
-    ICONSET_DIR="$TMP/icon.iconset"
-    mkdir -p "$ICONSET_DIR"
-    
-    # Generate all required sizes
-    sips -z 16 16 app/icon.png --out "$ICONSET_DIR/icon_16x16.png" 2>/dev/null || true
-    sips -z 32 32 app/icon.png --out "$ICONSET_DIR/icon_16x16@2x.png" 2>/dev/null || true
-    sips -z 32 32 app/icon.png --out "$ICONSET_DIR/icon_32x32.png" 2>/dev/null || true
-    sips -z 64 64 app/icon.png --out "$ICONSET_DIR/icon_32x32@2x.png" 2>/dev/null || true
-    sips -z 128 128 app/icon.png --out "$ICONSET_DIR/icon_128x128.png" 2>/dev/null || true
-    sips -z 256 256 app/icon.png --out "$ICONSET_DIR/icon_128x128@2x.png" 2>/dev/null || true
-    sips -z 256 256 app/icon.png --out "$ICONSET_DIR/icon_256x256.png" 2>/dev/null || true
-    sips -z 512 512 app/icon.png --out "$ICONSET_DIR/icon_256x256@2x.png" 2>/dev/null || true
-    sips -z 512 512 app/icon.png --out "$ICONSET_DIR/icon_512x512.png" 2>/dev/null || true
-    sips -z 1024 1024 app/icon.png --out "$ICONSET_DIR/icon_512x512@2x.png" 2>/dev/null || true
-    
-    # Convert to icns
-    iconutil -c icns "$ICONSET_DIR" -o "$RESOURCES_DIR/AppIcon.icns" 2>/dev/null || {
-        echo "  Warning: Could not create .icns, using .png directly"
-        cp app/icon.png "$RESOURCES_DIR/AppIcon.icns"
-    }
-    
-    rm -rf "$ICONSET_DIR"
-    echo "  ✓ Icon created"
-else
-    echo "  Warning: app/icon.png not found, using default icon"
-fi
 
 # ── Step 3: Create uninstaller script ─────────────────────────────────────────
 echo "Creating uninstaller..."

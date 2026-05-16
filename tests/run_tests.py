@@ -5,7 +5,7 @@ Auctus Agent Test Runner
 Automated test runner for v0.1.17 validation.
 
 Usage:
-    python tests/run_tests.py [category]
+    .venv/bin/python tests/run_tests.py [category]
 
 Categories:
     all         - Run all tests (default)
@@ -17,9 +17,9 @@ Categories:
     deps        - Dependency installation tests
 
 Examples:
-    python tests/run_tests.py
-    python tests/run_tests.py desktop
-    python tests/run_tests.py enhanced
+    .venv/bin/python tests/run_tests.py
+    .venv/bin/python tests/run_tests.py desktop
+    .venv/bin/python tests/run_tests.py enhanced
 """
 import sys
 import os
@@ -33,6 +33,8 @@ from datetime import datetime
 
 # Ensure we're in project root
 os.chdir(Path(__file__).parent.parent)
+
+PYTHON = sys.executable
 
 
 @dataclass
@@ -78,7 +80,7 @@ class TestRunner:
         
         start = time.time()
         success, stdout, stderr = self.run_command(
-            ['python', '-m', 'py_compile', 'app/desktop.py'],
+            [PYTHON, '-m', 'py_compile', 'app/desktop.py'],
             timeout=10
         )
         duration = time.time() - start
@@ -192,7 +194,7 @@ class TestRunner:
         
         start = time.time()
         success, stdout, stderr = self.run_command(
-            ['python', '-m', 'py_compile', 'app/desktop_enhanced.py'],
+            [PYTHON, '-m', 'py_compile', 'app/desktop_enhanced.py'],
             timeout=10
         )
         duration = time.time() - start
