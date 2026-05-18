@@ -51,6 +51,7 @@ mkdir -p data inputs outputs logs
 # Launch it in the background, keep Terminal visible while the app starts,
 # then tell the user they can close Terminal after the local server is healthy.
 echo "Starting Auctus Agent..."
+echo "Logs: $DIR/_app/logs/launcher.log"
 
 if curl -fsS http://127.0.0.1:8000/healthz >/dev/null 2>&1; then
   echo "Auctus Agent is already running."

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 import struct
 import uuid
 import zlib
@@ -63,6 +64,8 @@ async def _lifespan(app):
     from . import telegram_bot as _tg_bot
     from . import feishu_bot as _feishu_bot
     from .relay_client import start_relay_client, stop_relay_client
+    _ensure_runtime_dirs()
+    accounting.init_db()
     _tg_bot.run_in_thread()
     _feishu_bot.run_in_thread()
     _ensure_device_token()
@@ -93,6 +96,12 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
         return JSONResponse(
             status_code=500,
             content={"detail": f"本地文件或目录不存在，无法完成操作：{missing}"},
+        )
+    if isinstance(exc, sqlite3.OperationalError) and "unable to open database file" in str(exc).lower():
+        db_file = accounting.db_path()
+        return JSONResponse(
+            status_code=500,
+            content={"detail": f"本地数据库打不开：{db_file}。请把 Auctus Agent 解压到桌面或 Applications 后重新启动，不要从 Trash 或 zip 预览里运行。"},
         )
     return JSONResponse(status_code=500, content={"detail": f"{type(exc).__name__}: {exc}"})
 
