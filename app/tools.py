@@ -1194,7 +1194,7 @@ def configure_iot_gateway(
     existing: dict = {}
     if _IOT_CONFIG_PATH.exists():
         try:
-            existing = json.loads(_IOT_CONFIG_PATH.read_text())
+            existing = json.loads(_IOT_CONFIG_PATH.read_text(encoding="utf-8"))
         except Exception:
             existing = {}
     existing[gateway_type] = {
@@ -1204,7 +1204,7 @@ def configure_iot_gateway(
         "token_hint": hint,
         "updated_at": datetime.now().isoformat(),
     }
-    _IOT_CONFIG_PATH.write_text(json.dumps(existing, ensure_ascii=False, indent=2))
+    _IOT_CONFIG_PATH.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
     return {
         "ok": True,
         "gateway_type": gateway_type,
@@ -1229,7 +1229,7 @@ def call_iot_gateway(
     if not _IOT_CONFIG_PATH.exists():
         return {"error": "没有已配置的 IoT 网关。请先调用 configure_iot_gateway 设置网关 URL 和 Token。"}
     try:
-        configs: dict = json.loads(_IOT_CONFIG_PATH.read_text())
+        configs: dict = json.loads(_IOT_CONFIG_PATH.read_text(encoding="utf-8"))
     except Exception:
         return {"error": "IoT 配置文件损坏，请重新配置"}
     gw_type = (gateway_type or "home_assistant").lower().strip()

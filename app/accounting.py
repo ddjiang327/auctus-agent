@@ -168,7 +168,15 @@ def set_route(route: str) -> str:
     if route not in ROUTES:
         raise ValueError(f"unsupported route: {route}")
     settings.llm_route = route
+    set_setup_state({"llm_route": route})
     return route
+
+
+def restore_route_from_db() -> None:
+    """Called at startup to restore the route saved by set_route()."""
+    saved = get_setup_state().get("llm_route", "").strip().lower()
+    if saved and saved in ROUTES:
+        settings.llm_route = saved
 
 
 def current_route() -> str:

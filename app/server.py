@@ -32,15 +32,15 @@ def _ensure_device_token() -> None:
     token = secrets.token_urlsafe(32)
     env_path = Path(".env")
     if env_path.exists():
-        existing = env_path.read_text()
+        existing = env_path.read_text(encoding="utf-8")
         if "MOBILE_RELAY_DEVICE_TOKEN=" in existing:
             updated = "\n".join(
                 f"MOBILE_RELAY_DEVICE_TOKEN={token}" if line.startswith("MOBILE_RELAY_DEVICE_TOKEN=") else line
                 for line in existing.splitlines()
             )
-            env_path.write_text(updated)
+            env_path.write_text(updated, encoding="utf-8")
         else:
-            env_path.write_text(existing.rstrip() + f"\nMOBILE_RELAY_DEVICE_TOKEN={token}\n")
+            env_path.write_text(existing.rstrip() + f"\nMOBILE_RELAY_DEVICE_TOKEN={token}\n", encoding="utf-8")
     settings.mobile_relay_device_token = token
     print(f"[Relay] Generated device token: {token[:8]}...")
 
@@ -66,6 +66,7 @@ async def _lifespan(app):
     from .relay_client import start_relay_client, stop_relay_client
     _ensure_runtime_dirs()
     accounting.init_db()
+    accounting.restore_route_from_db()
     _tg_bot.run_in_thread()
     _feishu_bot.run_in_thread()
     _ensure_device_token()
@@ -354,7 +355,10 @@ h2{font-size:14px;margin:0 0 8px;color:#555;text-transform:uppercase;letter-spac
 <body>
 <header>
   <strong>Auctus Agent</strong>
-  <button id="openSettings" class="icon" type="button" title="设置" aria-label="设置">⚙</button>
+  <div style="display:flex;align-items:center;gap:10px">
+    <div id="mobileStatusIndicator" style="display:flex;align-items:center;gap:6px;font-size:13px"></div>
+    <button id="openSettings" class="icon" type="button" title="设置" aria-label="设置">⚙</button>
+  </div>
 </header>
 <main>
   <div class="chat">
@@ -452,6 +456,13 @@ h2{font-size:14px;margin:0 0 8px;color:#555;text-transform:uppercase;letter-spac
       <h2>工具日志</h2>
       <button id="refreshLogs">刷新</button>
       <div id="logs" class="stack" style="margin-top:8px"></div>
+    </section>
+    <section id="mobileAppSection">
+      <h2>Auctus Mobile App</h2>
+      <div id="mobileSettingsStatus" class="muted" style="margin-bottom:8px"></div>
+      <div class="row">
+        <button id="openPairingPage" type="button">扫码连接手机</button>
+      </div>
     </section>
     <section id="communicationSection">
       <h2>通信连接</h2>
@@ -1870,6 +1881,47 @@ async function pollTelegramInbox() {
 }
 setInterval(pollTelegramInbox, 5000);
 
+// ── Mobile status indicator ──────────────────────────────────────────────────
+const mobileIndicator = document.getElementById('mobileStatusIndicator');
+const mobileSettingsStatus = document.getElementById('mobileSettingsStatus');
+
+async function updateMobileStatus() {
+  try {
+    const r = await fetch('/api/mobile-status');
+    if (!r.ok) return;
+    const { configured, connected } = await r.json();
+
+    // Header indicator
+    if (!configured) {
+      mobileIndicator.innerHTML = '<a href="/pair" target="_blank" style="display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border:1px solid #bbb;border-radius:14px;font-size:12px;color:#555;background:#f9f9f9;text-decoration:none;cursor:pointer">📱 连接手机</a>';
+    } else if (connected) {
+      mobileIndicator.innerHTML = '<span style="display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border:1px solid #b7e8b0;border-radius:14px;font-size:12px;color:#2c6e28;background:#f0faf0"><span style="width:7px;height:7px;border-radius:50%;background:#2e8b2e;flex-shrink:0"></span>手机已连接</span>';
+    } else {
+      mobileIndicator.innerHTML = '<a href="/pair" target="_blank" style="display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border:1px solid #f5c5a0;border-radius:14px;font-size:12px;color:#8b4500;background:#fff8f3;text-decoration:none;cursor:pointer"><span style="width:7px;height:7px;border-radius:50%;background:#e08020;flex-shrink:0"></span>手机未连接</a>';
+    }
+
+    // Settings panel status text
+    if (mobileSettingsStatus) {
+      if (!configured) {
+        mobileSettingsStatus.textContent = '未配置：请先在 .env 中设置 MOBILE_RELAY_URL 和 MOBILE_RELAY_ADMIN_SECRET';
+      } else if (connected) {
+        mobileSettingsStatus.textContent = '✓ 已连接';
+        mobileSettingsStatus.style.color = '#2c6e28';
+      } else {
+        mobileSettingsStatus.textContent = '已配置，等待手机连接…';
+        mobileSettingsStatus.style.color = '#8b4500';
+      }
+    }
+  } catch (_) {}
+}
+
+document.getElementById('openPairingPage').addEventListener('click', () => {
+  window.open('/pair', '_blank');
+});
+
+updateMobileStatus();
+setInterval(updateMobileStatus, 5000);
+
 async function init() {
   await loadLanguage();
   await loadHostedRegion();
@@ -3195,6 +3247,16 @@ def health():
     return {"ok": True, "model": settings.model, "route": accounting.current_route()}
 
 
+@app.get("/api/mobile-status")
+def mobile_status():
+    """Returns current mobile relay connection state."""
+    from .relay_client import is_relay_connected, is_relay_configured
+    return {
+        "configured": is_relay_configured(),
+        "connected": is_relay_connected(),
+    }
+
+
 @app.get("/api/pairing-info")
 def pairing_info():
     """Returns the data needed to generate a mobile pairing QR code."""
@@ -3233,27 +3295,52 @@ def pairing_qr():
 
 
 @app.get("/pair", response_class=HTMLResponse)
-def pair_page():
+def pair_page(lang: str = "zh"):
     relay_url = settings.mobile_relay_url or ""
     device_token = settings.mobile_relay_device_token or ""
     configured = bool(relay_url and device_token)
+    is_en = lang.startswith("en")
 
     if not configured:
-        qr_section = """<div style="color:#f85149;padding:20px;font-size:14px">
-            中继服务未配置<br>
-            <small style="color:#8b949e">请在 .env 中设置 MOBILE_RELAY_URL 和 MOBILE_RELAY_ADMIN_SECRET</small>
-        </div>"""
-        token_text = "未配置"
+        if is_en:
+            qr_section = """<div style="color:#f85149;padding:20px;font-size:14px">
+                Relay not configured<br>
+                <small style="color:#8b949e">Set MOBILE_RELAY_URL and MOBILE_RELAY_ADMIN_SECRET in .env</small>
+            </div>"""
+            token_text = "Not configured"
+        else:
+            qr_section = """<div style="color:#f85149;padding:20px;font-size:14px">
+                中继服务未配置<br>
+                <small style="color:#8b949e">请在 .env 中设置 MOBILE_RELAY_URL 和 MOBILE_RELAY_ADMIN_SECRET</small>
+            </div>"""
+            token_text = "未配置"
     else:
         qr_section = '<img src="/api/pairing-qr" width="240" height="240" alt="QR Code" style="display:block">'
         token_text = device_token
 
+    if is_en:
+        title = "Mobile Pairing"
+        subtitle = "Scan the QR code below with the Auctus Agent mobile app<br>Pair once, valid forever"
+        steps_title = "Pairing steps:"
+        steps = "1. Download the Auctus Agent mobile app<br>2. Open App → tap \"Scan to Pair\"<br>3. Scan the QR code above<br>4. Done! No need to scan again next time"
+        back_btn = "Back"
+        html_lang = "en"
+        page_title = "Auctus Agent — Mobile Pairing"
+    else:
+        title = "手机配对"
+        subtitle = "用 Auctus Agent 手机 App 扫描下方二维码<br>一次配对，永久有效"
+        steps_title = "配对步骤："
+        steps = "1. 下载 Auctus Agent 手机 App<br>2. 打开 App → 点击「扫码配对」<br>3. 扫描上方二维码<br>4. 完成！之后打开 App 无需重新扫码"
+        back_btn = "返回"
+        html_lang = "zh"
+        page_title = "Auctus Agent — 手机配对"
+
     return HTMLResponse(content=f"""<!DOCTYPE html>
-<html lang="zh">
+<html lang="{html_lang}">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Auctus Agent — 手机配对</title>
+<title>{page_title}</title>
 <style>
   * {{ box-sizing: border-box; margin: 0; padding: 0; }}
   body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -3278,18 +3365,15 @@ def pair_page():
 </head>
 <body>
 <div class="card">
-  <h1>手机配对</h1>
-  <p class="sub">用 Auctus Agent 手机 App 扫描下方二维码<br>一次配对，永久有效</p>
+  <h1>{title}</h1>
+  <p class="sub">{subtitle}</p>
   <div class="qr-wrap">{qr_section}</div>
   <div class="token-box">Token: {token_text}</div>
   <div class="steps">
-    <b>配对步骤：</b><br>
-    1. 下载 Auctus Agent 手机 App<br>
-    2. 打开 App → 点击「扫码配对」<br>
-    3. 扫描上方二维码<br>
-    4. 完成！之后打开 App 无需重新扫码
+    <b>{steps_title}</b><br>
+    {steps}
   </div>
-  <a href="/" class="btn">返回</a>
+  <a href="/" class="btn">{back_btn}</a>
 </div>
 </body>
 </html>""")

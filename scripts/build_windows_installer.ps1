@@ -13,7 +13,11 @@
 
 param(
     [string]$Version = "",
-    [string]$InnoSetupPath = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+    [string]$InnoSetupPath = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
+    # Optional: path to PFX certificate for code signing (avoids SmartScreen / SAC blocks)
+    # Example: -CertPath ".\cert.pfx" -CertPassword "mypassword"
+    [string]$CertPath = "",
+    [string]$CertPassword = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -267,6 +271,26 @@ if (!(Test-Path $ISS_TEMPLATE)) {
         if (Test-Path $EXE_OUTPUT) {
             Write-Host "  ✓ Installer created: $EXE_OUTPUT" -ForegroundColor Green
             Write-Host "    Size: $([math]::Round((Get-Item $EXE_OUTPUT).Length / 1MB, 2)) MB"
+
+            # ── Optional: Code signing (prevents SmartScreen / Smart App Control blocks) ──
+            if (![string]::IsNullOrWhiteSpace($CertPath) -and (Test-Path $CertPath)) {
+                Write-Host ""
+                Write-Host "  Signing installer with certificate: $CertPath" -ForegroundColor Yellow
+                $signtool = "${env:ProgramFiles(x86)}\Windows Kits\10\bin\x64\signtool.exe"
+                if (!(Test-Path $signtool)) {
+                    $signtool = "signtool.exe"  # fall back to PATH
+                }
+                if (![string]::IsNullOrWhiteSpace($CertPassword)) {
+                    & $signtool sign /fd SHA256 /p $CertPassword /f $CertPath /tr http://timestamp.digicert.com /td SHA256 $EXE_OUTPUT
+                } else {
+                    & $signtool sign /fd SHA256 /f $CertPath /tr http://timestamp.digicert.com /td SHA256 $EXE_OUTPUT
+                }
+                if ($LASTEXITCODE -eq 0) {
+                    Write-Host "  ✓ Installer signed" -ForegroundColor Green
+                } else {
+                    Write-Host "  ⚠ Code signing failed — installer will trigger SmartScreen warnings" -ForegroundColor Yellow
+                }
+            }
         }
     }
 }

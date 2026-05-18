@@ -666,6 +666,7 @@
           <div style="font-size:12px;color:rgba(234,240,255,.78)" id="statusText">待命</div>
         </div>
         <button id="stopBtn" class="danger" type="button" title="紧急停止（取消当前请求）">停止</button>
+        <div id="mobileStatusIndicator" style="display:flex;align-items:center"></div>
         <button id="openSettings" type="button" title="设置">⚙ 设置</button>
         <button id="shutdownBtn" type="button" title="退出 Auctus Agent 后台服务">退出 Auctus Agent</button>
       </div>
@@ -815,15 +816,15 @@
     </div>
 
     <div class="section">
-      <h3>邮件账户</h3>
-      <div class="muted" style="margin-bottom:10px">连接 Gmail / Outlook / QQ 邮箱等 IMAP 账户，Agent 可读取收件箱和搜索邮件（只读，不会自动发送）。Gmail/Outlook 建议使用应用专用密码。</div>
+      <h3 id="emailSectionTitle">邮件账户</h3>
+      <div id="emailSectionHelp" class="muted" style="margin-bottom:10px">连接 Gmail / Outlook / QQ 邮箱等 IMAP 账户，Agent 可读取收件箱和搜索邮件（只读，不会自动发送）。Gmail/Outlook 建议使用应用专用密码。</div>
       <div id="emailAccountList" style="display:grid;gap:8px;margin-bottom:10px"></div>
       <details id="emailAddForm">
-        <summary style="cursor:pointer;font-size:12px;color:rgba(234,240,255,.68);user-select:none">＋ 添加邮件账户</summary>
+        <summary id="emailAddSummary" style="cursor:pointer;font-size:12px;color:rgba(234,240,255,.68);user-select:none">＋ 添加邮件账户</summary>
         <div style="margin-top:10px;display:grid;gap:8px">
           <div class="row">
             <select id="emailProvider" style="flex:1">
-              <option value="">手动配置 IMAP</option>
+              <option id="emailProviderManual" value="">手动配置 IMAP</option>
               <option value="gmail">Gmail</option>
               <option value="outlook">Outlook / Hotmail</option>
               <option value="qq">QQ 邮箱</option>
@@ -848,14 +849,15 @@
             <button id="testEmailBtn" type="button">测试连接</button>
             <button id="saveEmailBtn" class="primary" type="button">添加账户</button>
           </div>
+
           <div id="emailStatus" class="status"></div>
         </div>
       </details>
     </div>
 
     <div class="section">
-      <h3>通信连接</h3>
-      <div class="muted" style="margin-bottom:10px">选择一个通信渠道进行配置。后续新增渠道只需要加入新的选项和配置面板。</div>
+      <h3 id="commSectionTitle">通信连接</h3>
+      <div id="commSectionHelp" class="muted" style="margin-bottom:10px">选择一个通信渠道进行配置。后续新增渠道只需要加入新的选项和配置面板。</div>
       <div class="row">
         <select id="commProvider" aria-label="选择通信渠道">
           <option value="telegram">Telegram</option>
@@ -868,9 +870,9 @@
         <div class="integration-card">
           <div id="tgStatus" class="integration-status"></div>
           <details id="tgConfigForm">
-            <summary style="cursor:pointer;font-size:13px;color:rgba(234,240,255,.74);padding:4px 0">配置 Telegram Bot</summary>
+            <summary id="tgConfigSummary" style="cursor:pointer;font-size:13px;color:rgba(234,240,255,.74);padding:4px 0">配置 Telegram Bot</summary>
             <div style="display:grid;gap:10px;margin-top:10px">
-              <div class="muted" style="line-height:1.6;font-size:12px">
+              <div id="tgInstructions" class="muted" style="line-height:1.6;font-size:12px">
                 <b>步骤：</b><br>
                 1. 在 Telegram 搜索 <b>@BotFather</b>，发送 <code>/newbot</code> 创建 Bot<br>
                 2. 复制 BotFather 给你的 Token（格式：<code>123456:ABC-…</code>）<br>
@@ -900,7 +902,7 @@
         <div class="integration-card">
           <div id="feishuConfiguredInfo" class="integration-status muted"></div>
           <div style="display:grid;gap:10px">
-            <div class="muted" style="line-height:1.6">
+            <div id="feishuInstructions" class="muted" style="line-height:1.6">
               <b>WebSocket 长连接模式：</b>Auctus 会主动连接飞书开放平台，不需要公网地址。<br>
               1. 在飞书开放平台创建企业自建应用并启用机器人<br>
               2. 在「事件订阅」选择「使用长连接接收事件」<br>
@@ -910,7 +912,7 @@
             <input id="feishuAppId" placeholder="飞书开放平台 App ID（cli_xxxxxxxxxxxxxxxx）" />
             <input id="feishuAppSecret" type="password" placeholder="飞书开放平台 App Secret" />
             <input id="feishuVerifyToken" placeholder="Verification Token（仅 Webhook 模式需要，可留空）" />
-            <div class="muted">当前接收模式：<b>WebSocket 长连接</b>。Webhook 地址仅作为高级备用：<code id="feishuWebhookUrl">http://127.0.0.1:8000/webhook/feishu</code></div>
+            <div id="feishuWebhookHint" class="muted">当前接收模式：<b>WebSocket 长连接</b>。Webhook 地址仅作为高级备用：<code id="feishuWebhookUrl">http://127.0.0.1:8000/webhook/feishu</code></div>
             <div class="row" style="justify-content:flex-end">
               <button id="feishuSaveBtn" class="primary" type="button">保存并启动长连接</button>
             </div>
@@ -923,7 +925,7 @@
         <div class="integration-card">
           <div id="larkConfiguredInfo" class="integration-status muted"></div>
           <div style="display:grid;gap:10px">
-            <div class="muted" style="line-height:1.6">
+            <div id="larkInstructions" class="muted" style="line-height:1.6">
               <b>WebSocket 长连接模式：</b>Auctus 会主动连接 Lark Open Platform，不需要公网地址。<br>
               1. 在 Lark Developer Console 创建应用并启用 Bot<br>
               2. 在 Event Subscriptions 选择 Long Connection / WebSocket<br>
@@ -938,6 +940,14 @@
             <div id="larkSaveStatus" class="status"></div>
           </div>
         </div>
+      </div>
+    </div>
+
+    <div class="section" id="mobileAppSection">
+      <h3 id="mobileAppTitle">Auctus Mobile App</h3>
+      <div id="mobileSettingsStatus" class="muted" style="margin-bottom:8px">检查连接状态…</div>
+      <div class="row">
+        <button id="openPairingPage" type="button">扫码连接手机</button>
       </div>
     </div>
 
@@ -1262,8 +1272,49 @@
         authorize: '授权',
         uploadTitle: '上传文件',
         upload: '上传到 inputs/',
+        mobileTitle: 'Auctus Mobile App',
+        mobileChecking: '检查连接状态…',
+        mobilePairBtn: '扫码连接手机',
+        mobileNotConfigured: '未配置：请在 .env 中设置 MOBILE_RELAY_URL 和 MOBILE_RELAY_ADMIN_SECRET',
+        mobileConnected: '✓ 手机 App 已连接',
+        mobileWaiting: '已配置，等待手机 App 连接…',
+        mobileHeaderBtn: '连接手机',
+        emailTitle: '邮件账户',
+        emailHelp: '连接 Gmail / Outlook / QQ 邮箱等 IMAP 账户，Agent 可读取收件箱和搜索邮件（只读，不会自动发送）。Gmail/Outlook 建议使用应用专用密码。',
+        emailAddSummary: '＋ 添加邮件账户',
+        emailProviderManual: '手动配置 IMAP',
+        emailAddressPlaceholder: '邮箱地址 *',
+        emailPasswordPlaceholder: '应用专用密码 *',
+        emailImapHostPlaceholder: 'IMAP 服务器（如 imap.gmail.com）',
+        testEmailBtn: '测试连接',
+        saveEmailBtn: '添加账户',
+        commTitle: '通信连接',
+        commHelp: '选择一个通信渠道进行配置。后续新增渠道只需要加入新的选项和配置面板。',
+        tgConfigSummary: '配置 Telegram Bot',
+        tgInstructions: '<b>步骤：</b><br>1. 在 Telegram 搜索 <b>@BotFather</b>，发送 <code>/newbot</code> 创建 Bot<br>2. 复制 BotFather 给你的 Token（格式：<code>123456:ABC-…</code>）<br>3. 给你的 Bot 发一条任意消息，然后点"获取我的 ID"<br>4. 点"保存并测试"，手机会收到确认消息',
+        tgTokenPlaceholder: 'Bot Token（粘贴后可验证）',
+        tgVerifyBtn: '验证 Token',
+        tgUserIdsPlaceholder: '允许的用户 ID（多个用逗号隔开）',
+        tgFetchIdBtn: '获取我的 ID',
+        tgSaveBtn: '保存并发送测试消息',
+        tgStatusNotConfigured: '● 未配置 Telegram Bot',
+        tgStatusConfigured: hint => `● 已连接 Bot（Token: ${hint}）`,
+        feishuInstructions: '<b>WebSocket 长连接模式：</b>Auctus 会主动连接飞书开放平台，不需要公网地址。<br>1. 在飞书开放平台创建企业自建应用并启用机器人<br>2. 在「事件订阅」选择「使用长连接接收事件」<br>3. 订阅 <code>im.message.receive_v1</code>，并开通接收/发送消息权限<br>4. 发布或安装应用后，把 App ID 和 App Secret 填到这里',
+        feishuAppIdPlaceholder: '飞书开放平台 App ID（cli_xxxxxxxxxxxxxxxx）',
+        feishuAppSecretPlaceholder: '飞书开放平台 App Secret',
+        feishuVerifyTokenPlaceholder: 'Verification Token（仅 Webhook 模式需要，可留空）',
+        feishuWebhookHint: '当前接收模式：<b>WebSocket 长连接</b>。Webhook 地址仅作为高级备用：',
+        feishuSaveBtn: '保存并启动长连接',
+        feishuStatusNotConfigured: '● 未配置飞书应用',
+        feishuStatusConfigured: appId => `● 已配置飞书应用：${appId}`,
+        larkInstructions: '<b>WebSocket 长连接模式：</b>Auctus 会主动连接 Lark Open Platform，不需要公网地址。<br>1. 在 Lark Developer Console 创建应用并启用 Bot<br>2. 在 Event Subscriptions 选择 Long Connection / WebSocket<br>3. 订阅 <code>im.message.receive_v1</code>，并开通接收/发送消息权限<br>4. 发布或安装应用后，把 App ID 和 App Secret 填到这里',
+        larkAppIdPlaceholder: 'Lark App ID（cli_xxxxxxxxxxxxxxxx）',
+        larkAppSecretPlaceholder: 'Lark App Secret',
+        larkSaveBtn: '保存并启动长连接',
+        larkStatusNotConfigured: '● 未配置 Lark 应用',
+        larkStatusConfigured: appId => `● 已配置 Lark 应用：${appId}`,
         memoryTitle: '候选记忆',
-        memoryHelp: '来自“首次设置向导/自我介绍”的信息会先进入候选列表，你可以确认或拒绝。',
+        memoryHelp: '来自”首次设置向导/自我介绍”的信息会先进入候选列表，你可以确认或拒绝。',
         logsTitle: '工具日志',
         refresh: '刷新',
         noMemories: '暂无候选记忆。',
@@ -1389,6 +1440,47 @@
         authorize: 'Authorize',
         uploadTitle: 'Upload File',
         upload: 'Upload to inputs/',
+        mobileTitle: 'Auctus Mobile App',
+        mobileChecking: 'Checking connection…',
+        mobilePairBtn: 'Scan to Connect Phone',
+        mobileNotConfigured: 'Not configured: set MOBILE_RELAY_URL and MOBILE_RELAY_ADMIN_SECRET in .env',
+        mobileConnected: '✓ Phone app connected',
+        mobileWaiting: 'Configured, waiting for phone app…',
+        mobileHeaderBtn: 'Connect Phone',
+        emailTitle: 'Email Accounts',
+        emailHelp: 'Connect Gmail, Outlook, QQ Mail, or any IMAP account. Agent can read your inbox and search emails (read-only, never sends). Use an app-specific password for Gmail/Outlook.',
+        emailAddSummary: '＋ Add email account',
+        emailProviderManual: 'Manual IMAP setup',
+        emailAddressPlaceholder: 'Email address *',
+        emailPasswordPlaceholder: 'App-specific password *',
+        emailImapHostPlaceholder: 'IMAP server (e.g. imap.gmail.com)',
+        testEmailBtn: 'Test connection',
+        saveEmailBtn: 'Add account',
+        commTitle: 'Communication',
+        commHelp: 'Choose a channel to configure. Add new channels by adding options and panels.',
+        tgConfigSummary: 'Configure Telegram Bot',
+        tgInstructions: '<b>Steps:</b><br>1. Search <b>@BotFather</b> on Telegram, send <code>/newbot</code> to create a bot<br>2. Copy the Token BotFather gives you (format: <code>123456:ABC-…</code>)<br>3. Send any message to your bot, then click "Get my ID"<br>4. Click "Save & test" — you\'ll get a confirmation message on your phone',
+        tgTokenPlaceholder: 'Bot Token (paste to verify)',
+        tgVerifyBtn: 'Verify Token',
+        tgUserIdsPlaceholder: 'Allowed user IDs (comma-separated)',
+        tgFetchIdBtn: 'Get my ID',
+        tgSaveBtn: 'Save & send test message',
+        tgStatusNotConfigured: '● Telegram Bot not configured',
+        tgStatusConfigured: hint => `● Bot connected (Token: ${hint})`,
+        feishuInstructions: '<b>WebSocket long-connection mode:</b> Auctus connects to Feishu Open Platform directly, no public address needed.<br>1. Create an enterprise app in Feishu Open Platform and enable the bot<br>2. In Event Subscriptions, choose "Receive events via long connection"<br>3. Subscribe to <code>im.message.receive_v1</code> and grant send/receive message permissions<br>4. Publish or install the app, then paste App ID and App Secret here',
+        feishuAppIdPlaceholder: 'Feishu App ID (cli_xxxxxxxxxxxxxxxx)',
+        feishuAppSecretPlaceholder: 'Feishu App Secret',
+        feishuVerifyTokenPlaceholder: 'Verification Token (only for Webhook mode, can be empty)',
+        feishuWebhookHint: 'Current mode: <b>WebSocket long connection</b>. Webhook URL is an advanced fallback: ',
+        feishuSaveBtn: 'Save & start long connection',
+        feishuStatusNotConfigured: '● Feishu app not configured',
+        feishuStatusConfigured: appId => `● Feishu app configured: ${appId}`,
+        larkInstructions: '<b>WebSocket long-connection mode:</b> Auctus connects to Lark Open Platform directly, no public address needed.<br>1. Create an app in Lark Developer Console and enable the bot<br>2. In Event Subscriptions, choose Long Connection / WebSocket<br>3. Subscribe to <code>im.message.receive_v1</code> and grant send/receive message permissions<br>4. Publish or install the app, then paste App ID and App Secret here',
+        larkAppIdPlaceholder: 'Lark App ID (cli_xxxxxxxxxxxxxxxx)',
+        larkAppSecretPlaceholder: 'Lark App Secret',
+        larkSaveBtn: 'Save & start long connection',
+        larkStatusNotConfigured: '● Lark app not configured',
+        larkStatusConfigured: appId => `● Lark app configured: ${appId}`,
         memoryTitle: 'Memory Candidates',
         memoryHelp: 'Information from setup/profile is saved as candidates first. You can confirm or reject it.',
         logsTitle: 'Tool Logs',
@@ -1542,6 +1634,44 @@
       setText('#saveWorkspace', tr('authorize'));
       setText('#uploadSectionTitle', tr('uploadTitle'));
       setText('#upload', tr('upload'));
+      setText('#mobileAppTitle', tr('mobileTitle'));
+      setText('#openPairingPage', tr('mobilePairBtn'));
+      setText('#mobileSettingsStatus', tr('mobileChecking'));
+      setText('#emailSectionTitle', tr('emailTitle'));
+      setText('#emailSectionHelp', tr('emailHelp'));
+      setText('#emailAddSummary', tr('emailAddSummary'));
+      setText('#emailProviderManual', tr('emailProviderManual'));
+      setText('#testEmailBtn', tr('testEmailBtn'));
+      setText('#saveEmailBtn', tr('saveEmailBtn'));
+      document.getElementById('emailAddress')?.setAttribute('placeholder', tr('emailAddressPlaceholder'));
+      document.getElementById('emailPassword')?.setAttribute('placeholder', tr('emailPasswordPlaceholder'));
+      document.getElementById('emailImapHost')?.setAttribute('placeholder', tr('emailImapHostPlaceholder'));
+      setText('#commSectionTitle', tr('commTitle'));
+      setText('#commSectionHelp', tr('commHelp'));
+      setText('#tgConfigSummary', tr('tgConfigSummary'));
+      const tgEl = document.getElementById('tgInstructions'); if (tgEl) tgEl.innerHTML = tr('tgInstructions');
+      setText('#tgVerifyBtn', tr('tgVerifyBtn'));
+      setText('#tgFetchIdBtn', tr('tgFetchIdBtn'));
+      setText('#tgSaveBtn', tr('tgSaveBtn'));
+      document.getElementById('tgToken')?.setAttribute('placeholder', tr('tgTokenPlaceholder'));
+      document.getElementById('tgUserIds')?.setAttribute('placeholder', tr('tgUserIdsPlaceholder'));
+      const fsEl = document.getElementById('feishuInstructions'); if (fsEl) fsEl.innerHTML = tr('feishuInstructions');
+      document.getElementById('feishuAppId')?.setAttribute('placeholder', tr('feishuAppIdPlaceholder'));
+      document.getElementById('feishuAppSecret')?.setAttribute('placeholder', tr('feishuAppSecretPlaceholder'));
+      document.getElementById('feishuVerifyToken')?.setAttribute('placeholder', tr('feishuVerifyTokenPlaceholder'));
+      const fsHint = document.getElementById('feishuWebhookHint');
+      if (fsHint) {
+        const url = document.getElementById('feishuWebhookUrl')?.textContent || 'http://127.0.0.1:8000/webhook/feishu';
+        fsHint.innerHTML = tr('feishuWebhookHint') + `<code id="feishuWebhookUrl">${url}</code>`;
+      }
+      setText('#feishuSaveBtn', tr('feishuSaveBtn'));
+      const lkEl = document.getElementById('larkInstructions'); if (lkEl) lkEl.innerHTML = tr('larkInstructions');
+      document.getElementById('larkAppId')?.setAttribute('placeholder', tr('larkAppIdPlaceholder'));
+      document.getElementById('larkAppSecret')?.setAttribute('placeholder', tr('larkAppSecretPlaceholder'));
+      setText('#larkSaveBtn', tr('larkSaveBtn'));
+      // refresh dynamic status texts so they pick up the new language
+      if (typeof loadTelegramConfig === 'function') loadTelegramConfig().catch(()=>{});
+      if (typeof loadFeishuConfig === 'function') loadFeishuConfig().catch(()=>{});
       setText('#memorySectionTitle', tr('memoryTitle'));
       setText('#memorySectionTitle + .muted', tr('memoryHelp'));
       setText('#logsSectionTitle', tr('logsTitle'));
@@ -2746,10 +2876,10 @@
         const r = await fetch('/api/telegram/config').then(r => r.json());
         const el = document.getElementById('tgStatus');
         if (r.configured) {
-          el.innerHTML = `<span style="color:#22c55e;font-size:12px">● 已连接 Bot（Token: ${r.token_hint}）</span>`;
+          el.innerHTML = `<span style="color:#22c55e;font-size:12px">${tr('tgStatusConfigured')(r.token_hint)}</span>`;
           if (r.allowed_user_ids) document.getElementById('tgUserIds').value = r.allowed_user_ids;
         } else {
-          el.innerHTML = '<span style="color:#aaa;font-size:12px">● 未配置 Telegram Bot</span>';
+          el.innerHTML = `<span style="color:#aaa;font-size:12px">${tr('tgStatusNotConfigured')}</span>`;
         }
       } catch(e) {}
     }
@@ -2823,22 +2953,22 @@
         const info = document.getElementById('feishuConfiguredInfo');
         if (info) {
           if (j.configured) {
-            info.textContent = `● 已配置飞书应用：${j.app_id}`;
+            info.textContent = tr('feishuStatusConfigured')(j.app_id);
             info.style.color = 'rgba(60,242,139,.95)';
             if ((j.domain || 'feishu') === 'feishu') document.getElementById('feishuAppId').value = j.app_id || '';
           } else {
-            info.textContent = '● 未配置飞书应用';
+            info.textContent = tr('feishuStatusNotConfigured');
             info.style.color = 'rgba(234,240,255,.68)';
           }
         }
         const larkInfo = document.getElementById('larkConfiguredInfo');
         if (larkInfo) {
           if (j.configured && j.domain === 'lark') {
-            larkInfo.textContent = `● 已配置 Lark 应用：${j.app_id}`;
+            larkInfo.textContent = tr('larkStatusConfigured')(j.app_id);
             larkInfo.style.color = 'rgba(60,242,139,.95)';
             document.getElementById('larkAppId').value = j.app_id || '';
           } else {
-            larkInfo.textContent = '● 未配置 Lark 应用';
+            larkInfo.textContent = tr('larkStatusNotConfigured');
             larkInfo.style.color = 'rgba(234,240,255,.68)';
           }
         }
@@ -3096,6 +3226,8 @@
         }
       }
       if (forceSetup) forceOpenSetupWizard();
+      // mobile status polling
+      startMobileStatusPolling();
       // initial greeting
       addBubble('agent', tr('greeting'));
       $('message').focus();
@@ -3104,6 +3236,38 @@
       // init drag & drop
       initDragDrop();
     })();
+
+    // ── Mobile App Status ────────────────────────────────────────────────────
+    function startMobileStatusPolling() {
+      async function update() {
+        try {
+          const r = await fetch('/api/mobile-status');
+          if (!r.ok) return;
+          const { configured, connected } = await r.json();
+          const indicator = $('mobileStatusIndicator');
+          const statusEl = $('mobileSettingsStatus');
+          const pairLang = state.language || 'zh';
+          const pairHref = `/pair?lang=${pairLang}`;
+          if (!configured) {
+            indicator.innerHTML = `<a href="${pairHref}" target="_blank" style="display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border:1px solid rgba(255,255,255,.18);border-radius:12px;font-size:12px;color:rgba(234,240,255,.65);text-decoration:none">📱 ${tr('mobileHeaderBtn')}</a>`;
+            if (statusEl) { statusEl.textContent = tr('mobileNotConfigured'); statusEl.style.color = ''; }
+          } else if (connected) {
+            indicator.innerHTML = `<span style="display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border:1px solid rgba(100,220,100,.35);border-radius:12px;font-size:12px;color:rgba(120,230,120,.9)"><span style="width:6px;height:6px;border-radius:50%;background:#4caf50;flex-shrink:0"></span>${tr('mobileConnected')}</span>`;
+            if (statusEl) { statusEl.textContent = tr('mobileConnected'); statusEl.style.color = 'rgba(120,230,120,.9)'; }
+          } else {
+            indicator.innerHTML = `<a href="${pairHref}" target="_blank" style="display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border:1px solid rgba(255,160,60,.35);border-radius:12px;font-size:12px;color:rgba(255,180,80,.9);text-decoration:none"><span style="width:6px;height:6px;border-radius:50%;background:#ff9800;flex-shrink:0"></span>${tr('mobileWaiting')}</a>`;
+            if (statusEl) { statusEl.textContent = tr('mobileWaiting'); statusEl.style.color = 'rgba(255,180,80,.9)'; }
+          }
+        } catch (_) {}
+      }
+      update();
+      setInterval(update, 5000);
+      const pairBtn = $('openPairingPage');
+      if (pairBtn) pairBtn.onclick = () => {
+        const lang = state.language || 'zh';
+        window.open(`/pair?lang=${lang}`, '_blank');
+      };
+    }
 
     // ── Drag & Drop File Upload ──────────────────────────────────────────────
     function initDragDrop() {

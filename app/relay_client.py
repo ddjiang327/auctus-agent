@@ -155,3 +155,18 @@ def start_relay_client(on_message: Callable[[str, str], str]) -> None:
 def stop_relay_client() -> None:
     if _client:
         _client.stop()
+
+
+def is_relay_connected() -> bool:
+    """Return True if the relay WebSocket is currently open."""
+    return _client is not None and _client._ws is not None
+
+
+def is_relay_configured() -> bool:
+    """Return True if relay credentials are present in settings."""
+    from .config import settings
+    return bool(
+        settings.mobile_relay_url
+        and settings.mobile_relay_admin_secret
+        and settings.mobile_relay_device_token
+    )

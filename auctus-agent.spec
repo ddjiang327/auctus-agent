@@ -81,12 +81,19 @@ a = Analysis(
         "h11",
         "httpcore",
         "httpx",
+        # QR code generation (mobile pairing page)
+        "qrcode",
+        "qrcode.image.svg",
+        "qrcode.image.pure_pil",
+        "qrcode.main",
         # PyWebView — native desktop window
         "webview",
         "webview.platforms.cocoa",           # macOS
         "webview.platforms.edgechromium",    # Windows (Edge WebView2)
         "webview.platforms.winforms",        # Windows fallback
         "webview.platforms.gtk",             # Linux
+        # relay client
+        "app.relay_client",
     ] + tiktoken_ext_hiddenimports + lark_oapi_hiddenimports,
     hookspath=[],
     hooksconfig={},
@@ -111,7 +118,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -126,7 +133,7 @@ coll = COLLECT(
     a.binaries,
     a.datas,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     name="AuctusAgent",
 )
