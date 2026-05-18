@@ -49,7 +49,7 @@ mkdir -p data inputs outputs logs
 
 # AuctusAgent starts the server and opens a native window via PyWebView.
 # Launch it in the background, keep Terminal visible while the app starts,
-# then close Terminal only after the local server is healthy.
+# then tell the user they can close Terminal after the local server is healthy.
 echo "Starting Auctus Agent..."
 nohup ./AuctusAgent >> logs/launcher.log 2>&1 &
 APP_PID=$!
@@ -57,8 +57,7 @@ APP_PID=$!
 for i in {1..60}; do
   if curl -fsS http://127.0.0.1:8000/healthz >/dev/null 2>&1; then
     echo "Auctus Agent is ready."
-    sleep 1
-    osascript -e 'tell application "Terminal" to close front window' >/dev/null 2>&1 &
+    echo "You can close this Terminal window. Auctus Agent will keep running."
     exit 0
   fi
   if ! kill -0 "$APP_PID" >/dev/null 2>&1; then
@@ -72,7 +71,6 @@ done
 echo "Auctus Agent is still starting. Keeping this window open for diagnostics."
 echo "If the app window does not appear, check logs/launcher.log."
 wait "$APP_PID"
-osascript -e 'tell application "Terminal" to close front window' >/dev/null 2>&1 &
 LAUNCH
 chmod +x "$LAUNCHER"
 
