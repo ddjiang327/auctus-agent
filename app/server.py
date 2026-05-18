@@ -76,6 +76,11 @@ app.include_router(relay.router)
 DEFAULT_PERMISSION_SCOPE = "full_computer"
 DEFAULT_TERMINAL_ACCESS = "enabled"
 
+
+def _ensure_runtime_dirs() -> None:
+    for runtime_dir in (settings.data_dir, settings.output_dir, settings.workspace_dir, settings.logs_dir):
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+
 # 输出目录公开下载（仅本地服务，不暴露公网）
 app.mount("/files", StaticFiles(directory=str(settings.output_dir)), name="files")
 
@@ -83,6 +88,12 @@ app.mount("/files", StaticFiles(directory=str(settings.output_dir)), name="files
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
     print(f"[server] unhandled error on {request.url.path}: {type(exc).__name__}: {exc}")
+    if isinstance(exc, FileNotFoundError):
+        missing = getattr(exc, "filename", "") or str(exc)
+        return JSONResponse(
+            status_code=500,
+            content={"detail": f"本地文件或目录不存在，无法完成操作：{missing}"},
+        )
     return JSONResponse(status_code=500, content={"detail": f"{type(exc).__name__}: {exc}"})
 
 
@@ -2516,6 +2527,7 @@ def detect_hosted_region(body: HostedRegionDetectIn) -> dict:
 
 @app.post("/api/hosted-login")
 def hosted_login(body: HostedLoginIn) -> dict:
+    _ensure_runtime_dirs()
     base_url = (body.base_url or "http://120.24.223.0").strip().rstrip("/")
     if not base_url.startswith(("https://", "http://")):
         raise HTTPException(400, "invalid hosted API URL")
@@ -2558,13 +2570,18 @@ def hosted_login(body: HostedLoginIn) -> dict:
                 raise HTTPException(502, "API Key 创建成功但后台没有返回 key")
 
             region = _normalize_hosted_region(body.region)
-            accounting.set_setup_state(
-                {
-                    "hosted_email": email,
-                    "hosted_region": region,
-                    "hosted_base_url": base_url,
-                }
-            )
+            try:
+                accounting.set_setup_state(
+                    {
+                        "hosted_email": email,
+                        "hosted_region": region,
+                        "hosted_base_url": base_url,
+                    }
+                )
+            except FileNotFoundError as e:
+                missing = getattr(e, "filename", "") or str(e)
+                print(f"[hosted-login] local setup state save failed: {missing}")
+                raise HTTPException(500, f"登录已通过，但本地保存登录状态失败：{missing}") from e
             return {
                 "token": token,
                 "email": email,
@@ -2577,6 +2594,10 @@ def hosted_login(body: HostedLoginIn) -> dict:
         raise
     except httpx.HTTPError as e:
         raise HTTPException(502, f"无法连接 Auctus API：{e}") from e
+    except FileNotFoundError as e:
+        missing = getattr(e, "filename", "") or str(e)
+        print(f"[hosted-login] local file error: {missing}")
+        raise HTTPException(500, f"本地文件或目录不存在，无法完成登录：{missing}") from e
 
 
 @app.get("/api/permission-scope")
