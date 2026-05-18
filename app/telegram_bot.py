@@ -14,12 +14,33 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler, ContextTypes, filters,
 )
 
-from . import agent, server
+from . import agent, server, accounting
 from .config import settings
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("tg")
 _PENDING_PERMISSIONS: dict[int, dict] = {}
+_BOT_THREAD: Optional["threading.Thread"] = None
+
+
+def _auto_bind_first_telegram_user(user_id: int) -> bool:
+    """Bind the first /start sender when no allowlist exists yet."""
+    if settings.telegram_allowed_user_ids.strip():
+        return False
+
+    value = str(user_id)
+    env_path = Path(".env")
+    try:
+        from dotenv import set_key as _set_key
+        env_path.touch()
+        _set_key(str(env_path), "TELEGRAM_ALLOWED_USER_IDS", value)
+    except Exception:
+        log.exception("Failed to auto-bind Telegram user id")
+        return False
+
+    settings.telegram_allowed_user_ids = value
+    log.info("Telegram user %s auto-bound as first allowed user", value)
+    return True
 
 
 def _auth_ok(user_id: Optional[int]) -> bool:
@@ -101,21 +122,42 @@ def _run_chat_for_telegram(uid: int, text: str, choice: Optional[str] = None) ->
             payload["calendar_permission"] = choice
         _PENDING_PERMISSIONS.pop(uid, None)
 
+    accounting.add_telegram_inbox_message("in", text, from_user=str(uid))
+
     out = server.chat(server.ChatIn(**payload))
     data = out.model_dump() if hasattr(out, "model_dump") else out.dict()
     if data.get("permission_request"):
         req = data["permission_request"]
         _PENDING_PERMISSIONS[uid] = {"message": text, "type": req.get("type", "")}
-        return {"reply": _permission_reply_text(req), "files": [], "permission_request": req}
+        reply = _permission_reply_text(req)
+        accounting.add_telegram_inbox_message("out", reply, from_user="agent")
+        return {"reply": reply, "files": [], "permission_request": req}
+
+    reply = data.get("reply", "")
+    if reply:
+        accounting.add_telegram_inbox_message("out", reply, from_user="agent")
     return data
 
 
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    await update.message.reply_text(
-        f"你好！我是你的秘书 Agent。\n你的 Telegram ID 是 {uid}\n"
-        "把它填到 .env 的 TELEGRAM_ALLOWED_USER_IDS 里限定只有你能用。"
-    )
+    if _auto_bind_first_telegram_user(uid):
+        await update.message.reply_text(
+            f"你好！我是你的秘书 Agent。\n已自动绑定你的 Telegram ID：{uid}\n"
+            "现在可以直接发任务给我。"
+        )
+        return
+
+    if _auth_ok(uid):
+        await update.message.reply_text(
+            f"你好！我是你的秘书 Agent。\n你的 Telegram ID 是 {uid}\n"
+            "你已经可以直接发任务给我。"
+        )
+    else:
+        await update.message.reply_text(
+            f"你好！我是你的秘书 Agent。\n你的 Telegram ID 是 {uid}\n"
+            "当前 Bot 已绑定其他允许用户，请在 Auctus 设置里添加这个 ID 后再使用。"
+        )
 
 
 async def handle_msg(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -177,7 +219,7 @@ async def handle_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"文件处理失败：{type(e).__name__}: {e}")
 
 
-def main() -> None:
+def main(*, stop_signals=None) -> None:
     if not settings.telegram_bot_token:
         raise SystemExit("请在 .env 设置 TELEGRAM_BOT_TOKEN")
     app = Application.builder().token(settings.telegram_bot_token).build()
@@ -185,7 +227,37 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_msg))
     log.info("Telegram bot 启动中…")
-    app.run_polling()
+    app.run_polling(stop_signals=stop_signals)
+
+
+def run_in_thread() -> None:
+    """在守护线程中启动 Telegram bot（由 FastAPI lifespan 调用）。"""
+    import threading
+    global _BOT_THREAD
+    if not settings.telegram_bot_token:
+        log.info("未配置 TELEGRAM_BOT_TOKEN，跳过 Telegram bot 启动")
+        return
+    if _BOT_THREAD and _BOT_THREAD.is_alive():
+        log.info("Telegram bot 线程已在运行")
+        return
+
+    def _thread_main() -> None:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            main(stop_signals=None)
+        except Exception:
+            log.exception("Telegram bot 线程异常退出")
+        finally:
+            try:
+                loop.close()
+            except Exception:
+                pass
+
+    t = threading.Thread(target=_thread_main, daemon=True, name="telegram-bot")
+    t.start()
+    _BOT_THREAD = t
+    log.info("Telegram bot 线程已启动")
 
 
 if __name__ == "__main__":

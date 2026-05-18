@@ -4,9 +4,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 if [ ! -x ".venv/bin/uvicorn" ]; then
-  echo "缺少 .venv/bin/uvicorn。请先完成安装："
-  echo "- 推荐：在项目根目录双击 Setup.command"
-  echo "- 或手动运行：scripts/install_mac.sh"
+  echo "Missing .venv/bin/uvicorn. Please complete installation first:"
+  echo "- Recommended: double-click Setup.command in the project root"
+  echo "- Or run manually: scripts/install_mac.sh"
   exit 1
 fi
 

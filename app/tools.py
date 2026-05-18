@@ -8,6 +8,8 @@
 from __future__ import annotations
 
 import json
+import base64
+import mimetypes
 import re
 import subprocess
 import time
@@ -29,6 +31,7 @@ from . import cronjobs
 from . import evolution
 from . import memory
 from . import llm
+from . import terminal_sessions
 
 
 # ---------- 工具实现 ----------
@@ -186,6 +189,89 @@ def run_terminal_command(command: str, working_directory: Optional[str] = None, 
         "stderr": stderr,
         "truncated": len(completed.stdout) > len(stdout) or len(completed.stderr) > len(stderr),
     }
+
+
+def analyze_image(path: str, question: str = "") -> dict:
+    """Analyze an authorized image file with the configured vision model."""
+    target = _authorized_path(path)
+    if target is None:
+        return {"error": "access denied: path is outside authorized workspace or chat-authorized paths"}
+    if not target.exists() or not target.is_file():
+        return {"error": f"image not found: {path}"}
+    suffix = target.suffix.lower()
+    if suffix not in _READABLE_IMAGE_SUFFIXES:
+        return {"error": f"unsupported image type: {suffix}"}
+    size = target.stat().st_size
+    if size > 10 * 1024 * 1024:
+        return {"error": "image is too large for inline analysis; keep it under 10 MB"}
+    mime = mimetypes.guess_type(target.name)[0] or "image/png"
+    data = base64.b64encode(target.read_bytes()).decode("ascii")
+    prompt = (question or "").strip() or (
+        "Analyze this image. Extract visible text, describe the important visual content, "
+        "and mention anything that looks like an error, chart, table, UI state, or action item."
+    )
+    try:
+        content = llm.vision_completion(
+            image_data_url=f"data:{mime};base64,{data}",
+            question=prompt,
+        )
+    except Exception as exc:
+        return {
+            "error": (
+                f"{type(exc).__name__}: {exc}. "
+                "Image analysis requires a vision-capable model and provider route."
+            )
+        }
+    return {
+        "filename": target.name,
+        "path": str(target),
+        "size": size,
+        "content": content,
+    }
+
+
+def terminal_session_start(
+    command: str,
+    working_directory: Optional[str] = None,
+    label: str = "",
+) -> dict:
+    """Start a managed long-running terminal session."""
+    if _terminal_access() != "enabled":
+        return {"error": "terminal access is disabled. Enable it in Settings first."}
+    command = (command or "").strip()
+    if not command:
+        return {"error": "empty command"}
+    blocked = _blocked_terminal_reason(command)
+    if blocked:
+        return {"error": blocked}
+    cwd = _terminal_cwd(working_directory)
+    if cwd is None:
+        return {"error": "working directory is outside allowed scope or does not exist"}
+    return terminal_sessions.start(command=command, working_directory=cwd, label=label)
+
+
+def terminal_session_list() -> dict:
+    """List managed terminal sessions."""
+    return terminal_sessions.list_sessions()
+
+
+def terminal_session_tail(session_id: str, lines: int = 80) -> dict:
+    """Return recent output from a managed terminal session."""
+    return terminal_sessions.tail(session_id=session_id, lines=lines)
+
+
+def terminal_session_send(session_id: str, text: str, append_newline: bool = True) -> dict:
+    """Send input to a managed terminal session."""
+    if _terminal_access() != "enabled":
+        return {"error": "terminal access is disabled. Enable it in Settings first."}
+    return terminal_sessions.send(session_id=session_id, text=text, append_newline=append_newline)
+
+
+def terminal_session_stop(session_id: str, force: bool = False) -> dict:
+    """Stop a managed terminal session."""
+    if _terminal_access() != "enabled":
+        return {"error": "terminal access is disabled. Enable it in Settings first."}
+    return terminal_sessions.stop(session_id=session_id, force=force)
 
 
 @contextmanager
@@ -891,7 +977,7 @@ def create_cron_job(name: str, schedule: str, task: str, input_file: str = "") -
         "ok": True,
         "job": job,
         "crontab_snippet": snippet,
-        "note": "定时任务已创建。运行 `python agent.py cron apply` 可将其写入系统 crontab 自动生效。",
+        "note": "定时任务已创建，到时间会自动执行。",
     }
 
 
@@ -1180,7 +1266,13 @@ def call_iot_gateway(
 _RISK = {
     "read_file": "medium",
     "write_file": "medium",
+    "analyze_image": "low",
     "run_terminal_command": "high",
+    "terminal_session_start": "high",
+    "terminal_session_list": "low",
+    "terminal_session_tail": "low",
+    "terminal_session_send": "high",
+    "terminal_session_stop": "high",
     "summarize_text": "low",
     "summarize_email_text": "low",
     "extract_email_tasks": "low",
@@ -1242,7 +1334,7 @@ def _has_explicit_user_approval(name: str, user_input: str) -> bool:
         return any(k.lower() in text for k in _REMEMBER_KEYWORDS)
     if name == "forget_memory":
         return any(k.lower() in text for k in _FORGET_KEYWORDS)
-    if name == "run_terminal_command":
+    if name in {"run_terminal_command", "terminal_session_start", "terminal_session_send", "terminal_session_stop"}:
         return any(k.lower() in text for k in _TERMINAL_KEYWORDS)
     return False
 
@@ -1329,6 +1421,164 @@ def _attach_retry_hint(result: Any, name: str, error: str, user_input: str) -> A
     return {"error": error, "result": result, "retry_hint": hint}
 
 
+# ---------- Telegram / Feishu 集成 ----------
+
+def get_integration_status() -> dict:
+    """查看当前已配置的第三方连接状态（Telegram、飞书等）。"""
+    from .config import settings
+    from . import accounting as _acct
+    state = _acct.get_setup_state()
+    tg_token = settings.telegram_bot_token or ""
+    tg_ids = settings.telegram_allowed_user_ids or ""
+    feishu_app_id = state.get("feishu_app_id", "")
+    return {
+        "telegram": {
+            "configured": bool(tg_token),
+            "token_hint": f"...{tg_token[-6:]}" if len(tg_token) > 6 else ("(未配置)" if not tg_token else tg_token),
+            "allowed_user_ids": tg_ids,
+        },
+        "feishu": {
+            "configured": bool(feishu_app_id),
+            "app_id": feishu_app_id if feishu_app_id else "(未配置)",
+            "receive_mode": state.get("feishu_receive_mode", "websocket"),
+            "domain": state.get("feishu_domain", "feishu"),
+        },
+    }
+
+
+def configure_telegram(bot_token: str = "", allowed_user_ids: str = "", confirmed: bool = False) -> dict:
+    """在对话中配置 Telegram Bot。验证 token，自动获取用户 ID（如未提供），保存到 .env。"""
+    import urllib.request, urllib.parse, json as _json
+    from .config import settings
+    from pathlib import Path as _Path
+
+    if not confirmed:
+        return {"error": "需要用户确认。请在参数中加入 confirmed: true。"}
+
+    token = bot_token.strip()
+    if not token:
+        return {"error": "需要提供 bot_token。请告知用户去 Telegram 找 @BotFather 发 /newbot 获取。"}
+
+    def _tg(method: str, params: dict | None = None) -> dict:
+        url = f"https://api.telegram.org/bot{token}/{method}"
+        if params:
+            url += "?" + urllib.parse.urlencode(params)
+        try:
+            with urllib.request.urlopen(url, timeout=8) as r:
+                return _json.loads(r.read())
+        except Exception as e:
+            return {"ok": False, "description": str(e)}
+
+    verify = _tg("getMe")
+    if not verify.get("ok"):
+        return {"error": f"Token 无效：{verify.get('description', '验证失败')}"}
+
+    bot_info = verify.get("result", {})
+    bot_username = bot_info.get("username", "")
+
+    ids_str = allowed_user_ids.strip()
+    if not ids_str:
+        updates = _tg("getUpdates", {"limit": 20, "timeout": 0})
+        if updates.get("ok"):
+            seen: dict[int, str] = {}
+            for upd in updates.get("result", []):
+                sender = (upd.get("message") or {}).get("from") or {}
+                uid = sender.get("id")
+                if uid and uid not in seen:
+                    name = " ".join(filter(None, [sender.get("first_name"), sender.get("last_name")])) or str(uid)
+                    seen[uid] = name
+            if seen:
+                ids_str = ",".join(str(k) for k in seen)
+
+    env_path = _Path(".env")
+    try:
+        from dotenv import set_key as _set_key
+        env_path.touch()
+        _set_key(str(env_path), "TELEGRAM_BOT_TOKEN", token)
+        if ids_str:
+            _set_key(str(env_path), "TELEGRAM_ALLOWED_USER_IDS", ids_str)
+    except Exception as e:
+        return {"error": f"写入 .env 失败：{e}"}
+
+    settings.telegram_bot_token = token
+    settings.telegram_allowed_user_ids = ids_str
+
+    return {
+        "ok": True,
+        "bot_username": bot_username,
+        "allowed_user_ids": ids_str or "(未设置)",
+        "message": (
+            f"Telegram Bot 已配置成功！Bot 用户名：@{bot_username}。"
+            + (f" 已绑定用户 ID：{ids_str}。" if ids_str else " 建议先发 /start 给 Bot，再重新调用以自动获取你的用户 ID。")
+            + " 在手机 Telegram 搜索并打开这个 Bot，即可开始使用。"
+        ),
+    }
+
+
+def configure_feishu(app_id: str = "", app_secret: str = "", verification_token: str = "", receive_mode: str = "websocket", domain: str = "feishu", confirmed: bool = False) -> dict:
+    """在对话中配置飞书机器人。默认使用 WebSocket 长连接，不需要公网地址。"""
+    import urllib.request, json as _json
+    from . import accounting as _acct
+
+    if not confirmed:
+        return {"error": "需要用户确认。请在参数中加入 confirmed: true。"}
+
+    app_id = app_id.strip()
+    app_secret = app_secret.strip()
+    verification_token = verification_token.strip()
+    receive_mode = (receive_mode or "websocket").strip().lower()
+    domain = (domain or "feishu").strip().lower()
+    if not app_id or not app_secret:
+        return {"error": "需要提供 app_id 和 app_secret。请到飞书开放平台 open.feishu.cn 创建应用后获取。"}
+    if receive_mode not in {"websocket", "webhook"}:
+        return {"error": "receive_mode 必须是 websocket 或 webhook。桌面版推荐 websocket。"}
+    if domain not in {"feishu", "lark"}:
+        return {"error": "domain 必须是 feishu 或 lark。"}
+
+    def _get_token() -> tuple[str, str]:
+        api_host = "open.larksuite.com" if domain == "lark" else "open.feishu.cn"
+        url = f"https://{api_host}/open-apis/auth/v3/tenant_access_token/internal"
+        data = _json.dumps({"app_id": app_id, "app_secret": app_secret}).encode()
+        req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=8) as r:
+                resp = _json.loads(r.read())
+                if resp.get("code") == 0:
+                    return resp.get("tenant_access_token", ""), ""
+                return "", resp.get("msg", "验证失败")
+        except Exception as e:
+            return "", str(e)
+
+    access_token, err = _get_token()
+    if not access_token:
+        return {"error": f"飞书验证失败：{err}。请检查 App ID 和 App Secret 是否正确。"}
+
+    _acct.set_setup_state({
+        "feishu_app_id": app_id,
+        "feishu_app_secret": app_secret,
+        "feishu_verification_token": verification_token,
+        "feishu_receive_mode": receive_mode,
+        "feishu_domain": domain,
+    })
+
+    if receive_mode == "websocket":
+        try:
+            from . import feishu_bot as _feishu_bot
+            _feishu_bot.run_in_thread()
+        except Exception as e:
+            return {"error": f"飞书配置已保存，但启动长连接失败：{type(e).__name__}: {e}"}
+
+    msg = (
+        f"飞书机器人已配置成功！App ID：{app_id}。"
+        "当前使用 WebSocket 长连接模式：Auctus 会主动连接飞书开放平台，不需要公网地址。"
+        "请在飞书开放平台的【事件订阅】选择【使用长连接接收事件】，订阅 im.message.receive_v1，"
+        "并开通机器人接收消息和发送消息权限。"
+    )
+    if verification_token:
+        msg += " Verification Token 已保存，主要用于 Webhook 备用模式。"
+    return {"ok": True, "app_id": app_id, "receive_mode": receive_mode, "domain": domain, "message": msg}
+
+
 # ---------- 工具 schema（喂给 LLM）----------
 
 TOOL_SCHEMAS: list[dict] = [
@@ -1371,6 +1621,27 @@ TOOL_SCHEMAS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "analyze_image",
+            "description": "分析已授权路径内的图片或截图。支持 png/jpg/jpeg/webp/gif。可提取图片文字、理解 UI 截图、图表、表格、报错信息。需要当前模型支持 vision。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "相对于授权 workspace 的图片路径，或用户当前消息里明确给出的绝对图片路径。",
+                    },
+                    "question": {
+                        "type": "string",
+                        "description": "希望模型重点回答的问题，例如“这个截图报错是什么意思？”",
+                    },
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "run_terminal_command",
             "description": "执行本机终端命令。只有 Settings 已启用终端权限时才能使用。默认工作目录为授权 workspace；若文件权限为整台电脑，可指定其他工作目录。会拦截明显危险命令。",
             "parameters": {
@@ -1382,6 +1653,79 @@ TOOL_SCHEMAS: list[dict] = [
                     "confirmed": {"type": "boolean", "description": "当你理解用户意图是执行此操作时，设为 true。不限语言或措辞，只要你判断用户确实想执行该命令即可。"},
                 },
                 "required": ["command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "terminal_session_start",
+            "description": "启动一个受控的长期终端 session，用于 Claude Code、Codex、测试、构建、开发服务器等持续运行任务。启动后可用 terminal_session_tail 查看输出、terminal_session_send 继续输入、terminal_session_stop 停止。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "要启动的 shell 命令"},
+                    "working_directory": {"type": "string", "description": "命令执行目录，可选"},
+                    "label": {"type": "string", "description": "方便用户识别的短标签，可选"},
+                    "confirmed": {"type": "boolean", "description": "用户明确要求启动此终端任务时设为 true"},
+                },
+                "required": ["command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "terminal_session_list",
+            "description": "列出 Auctus Agent 管理的长期终端 sessions，包括状态、命令、工作目录和 session_id。",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "terminal_session_tail",
+            "description": "查看受控终端 session 最近输出，用于判断 Claude Code/Codex/构建/测试是否完成、卡住或报错。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string", "description": "terminal_session_start 或 list 返回的 session id"},
+                    "lines": {"type": "integer", "description": "返回最近多少行，默认 80，最大 500"},
+                },
+                "required": ["session_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "terminal_session_send",
+            "description": "向受控终端 session 发送输入，例如给 Claude Code/Codex 继续发新指令。必须是用户明确要求继续发送时才可使用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string", "description": "目标 session id"},
+                    "text": {"type": "string", "description": "要发送到 stdin 的文本"},
+                    "append_newline": {"type": "boolean", "description": "是否自动追加换行，默认 true"},
+                    "confirmed": {"type": "boolean", "description": "用户明确要求发送此输入时设为 true"},
+                },
+                "required": ["session_id", "text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "terminal_session_stop",
+            "description": "停止一个受控终端 session。默认发送 TERM，force=true 时强制终止。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string", "description": "目标 session id"},
+                    "force": {"type": "boolean", "description": "是否强制终止，默认 false"},
+                    "confirmed": {"type": "boolean", "description": "用户明确要求停止时设为 true"},
+                },
+                "required": ["session_id"],
             },
         },
     },
@@ -1840,7 +2184,7 @@ TOOL_SCHEMAS: list[dict] = [
         "type": "function",
         "function": {
             "name": "create_cron_job",
-            "description": "创建定时任务。生成可执行脚本并注册到 Auctus Agent cron 管理器。用户说每天/每周/定时执行某个任务时使用。创建后告知用户运行 python agent.py cron apply 写入系统 crontab。",
+            "description": "创建定时任务。生成可执行脚本并注册到 Auctus Agent cron 管理器。用户说每天/每周/定时执行某个任务时使用。创建成功后简单告知用户定时任务已设置好，不要提及技术细节（crontab、命令行等）。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1908,6 +2252,49 @@ TOOL_SCHEMAS: list[dict] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_integration_status",
+            "description": "查看当前已配置的第三方连接状态（Telegram、飞书等），包括是否已启用、账号信息。用户问【我有没有连接 Telegram/飞书】时调用。",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "configure_telegram",
+            "description": "在对话中配置 Telegram Bot。用户说【连接/配置/绑定 Telegram】时调用。先询问 Bot Token，验证后自动获取用户 ID，保存配置。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "bot_token": {"type": "string", "description": "从 @BotFather 获取的 Bot Token"},
+                    "allowed_user_ids": {"type": "string", "description": "允许使用 Bot 的 Telegram 用户 ID（逗号分隔），留空则自动从 getUpdates 获取"},
+                    "confirmed": {"type": "boolean", "description": "必须传 true 才会保存配置"},
+                },
+                "required": ["bot_token", "confirmed"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "configure_feishu",
+            "description": "在对话中配置飞书机器人。用户说【连接/配置/绑定飞书】时调用。默认使用 WebSocket 长连接接收事件，不需要公网地址。先询问 App ID 和 App Secret，验证后保存。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "app_id": {"type": "string", "description": "飞书开放平台应用的 App ID"},
+                    "app_secret": {"type": "string", "description": "飞书开放平台应用的 App Secret"},
+                    "verification_token": {"type": "string", "description": "事件订阅的 Verification Token（仅 Webhook 备用模式需要，可选）"},
+                    "receive_mode": {"type": "string", "description": "接收模式，桌面版默认 websocket；可选 websocket 或 webhook"},
+                    "domain": {"type": "string", "description": "平台域名类型，飞书填 feishu，国际版 Lark 填 lark"},
+                    "confirmed": {"type": "boolean", "description": "必须传 true 才会保存配置"},
+                },
+                "required": ["app_id", "app_secret", "confirmed"],
+            },
+        },
+    },
 ]
 
 # 从 schema 提取 required 参数，用于前置校验
@@ -1921,7 +2308,13 @@ for _sch in TOOL_SCHEMAS:
 _DISPATCH = {
     "read_file": read_file,
     "write_file": write_file,
+    "analyze_image": analyze_image,
     "run_terminal_command": run_terminal_command,
+    "terminal_session_start": terminal_session_start,
+    "terminal_session_list": terminal_session_list,
+    "terminal_session_tail": terminal_session_tail,
+    "terminal_session_send": terminal_session_send,
+    "terminal_session_stop": terminal_session_stop,
     "summarize_text": summarize_text,
     "summarize_email_text": summarize_email_text,
     "extract_email_tasks": extract_email_tasks,
@@ -1953,6 +2346,9 @@ _DISPATCH = {
     "list_cron_jobs": list_cron_jobs,
     "configure_iot_gateway": configure_iot_gateway,
     "call_iot_gateway": call_iot_gateway,
+    "get_integration_status": get_integration_status,
+    "configure_telegram": configure_telegram,
+    "configure_feishu": configure_feishu,
 }
 
 

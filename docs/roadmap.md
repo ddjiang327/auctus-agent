@@ -182,6 +182,52 @@
 
 ---
 
+### Phase 8.5：Mobile App + Desktop Agent Cloud Relay
+
+目标：让用户下载手机 App 后，通过 Auctus API 账号直接联系自己家里/办公室电脑上的桌面 Agent，不需要公网 IP、端口转发、Telegram、飞书或 Lark。
+
+用户路径：
+
+1. 下载手机 App
+2. 注册 / 登录 Auctus API
+3. 下载电脑端 Agent
+4. 电脑端显示二维码，手机扫码绑定账号
+5. 手机 App 发送任务
+6. 云端 Relay 转发给对应电脑 Agent
+7. Agent 本地执行后把结果回传 App
+
+核心实现步骤：
+
+- [ ] Auctus API 增加生产级 Device Registry：`user_id -> device_id -> device_token`
+- [ ] 桌面 Agent 增加二维码绑定流程：生成短期 `bind_code`，展示给手机扫码
+- [ ] 手机 App 增加登录、扫码绑定、设备列表
+- [ ] 桌面 Agent 使用 device token 主动连接云端 `wss://.../relay/tunnel/{device_id}`
+- [ ] Relay Hub 维护在线设备映射：`user_id -> device_id -> websocket`
+- [ ] 新增移动端任务 API：`POST /api/mobile/tasks`
+- [ ] Relay 将移动端任务封装为 `agent_task` 推送给对应桌面 Agent
+- [ ] 桌面 Agent 执行任务后回传 `agent_result`
+- [ ] 手机 App 展示任务状态、结果和生成文件
+- [ ] 增加任务状态机：queued / sent_to_device / running / needs_permission / completed / failed / timed_out
+- [ ] 增加离线处理：电脑不在线时提示设备离线，任务可排队或拒绝
+- [ ] 增加权限流：文件、终端、日历等敏感操作需要桌面策略或可信手机确认
+- [ ] 增加文件回传：桌面上传输出文件到云端临时 URL，手机可预览/下载
+- [ ] 增加推送通知：任务完成、需要权限、设备离线/重连
+- [ ] 增加安全控制：短期绑定码、单设备 token、token 撤销、消息签名、任务限流
+- [ ] 增加观测：任务日志、Tunnel 在线率、超时率、Relay 队列长度
+
+验收标准：
+
+- [ ] 新用户只需手机 App 登录 + 桌面扫码，即可完成一次远程任务
+- [ ] 用户没有公网 IP 时仍可使用
+- [ ] 手机只能给自己绑定的设备发任务
+- [ ] 桌面 Agent 离线时，App 有明确状态提示
+- [ ] 任务结果和生成文件能回到手机 App
+- [ ] 敏感操作不会被云端默认放行
+
+详细设计见：`docs/mobile-cloud-relay.md`
+
+---
+
 ### Phase 9：配额与风控 ✅ 基础版已完成
 
 - [x] 月度额度

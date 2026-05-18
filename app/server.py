@@ -20,7 +20,57 @@ from . import accounting, agent, memory, relay, tools
 from .config import settings
 from .version import API_COMPAT_VERSION, APP_NAME, APP_VERSION, RELEASE_CHANNEL
 
-app = FastAPI(title="Auctus Agent")
+from contextlib import asynccontextmanager
+
+def _ensure_device_token() -> None:
+    """Generate and persist MOBILE_RELAY_DEVICE_TOKEN on first run."""
+    if settings.mobile_relay_device_token:
+        return
+    import secrets
+    from pathlib import Path
+    token = secrets.token_urlsafe(32)
+    env_path = Path(".env")
+    if env_path.exists():
+        existing = env_path.read_text()
+        if "MOBILE_RELAY_DEVICE_TOKEN=" in existing:
+            updated = "\n".join(
+                f"MOBILE_RELAY_DEVICE_TOKEN={token}" if line.startswith("MOBILE_RELAY_DEVICE_TOKEN=") else line
+                for line in existing.splitlines()
+            )
+            env_path.write_text(updated)
+        else:
+            env_path.write_text(existing.rstrip() + f"\nMOBILE_RELAY_DEVICE_TOKEN={token}\n")
+    settings.mobile_relay_device_token = token
+    print(f"[Relay] Generated device token: {token[:8]}...")
+
+
+def _relay_chat_handler(session_id: str, content: str) -> str:
+    """Called by relay_client when a mobile message arrives. Reuses the /api/chat logic."""
+    import urllib.request as _urlreq
+    payload = json.dumps({"session_id": session_id, "message": content}).encode()
+    req = _urlreq.Request(
+        "http://127.0.0.1:8000/api/chat",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+    )
+    with _urlreq.urlopen(req, timeout=300) as resp:
+        data = json.loads(resp.read())
+    return data.get("reply", "")
+
+
+@asynccontextmanager
+async def _lifespan(app):
+    from . import telegram_bot as _tg_bot
+    from . import feishu_bot as _feishu_bot
+    from .relay_client import start_relay_client, stop_relay_client
+    _tg_bot.run_in_thread()
+    _feishu_bot.run_in_thread()
+    _ensure_device_token()
+    start_relay_client(_relay_chat_handler)
+    yield
+    stop_relay_client()
+
+app = FastAPI(title="Auctus Agent", lifespan=_lifespan)
 app.include_router(relay.router)
 
 DEFAULT_PERMISSION_SCOPE = "full_computer"
@@ -289,6 +339,7 @@ h2{font-size:14px;margin:0 0 8px;color:#555;text-transform:uppercase;letter-spac
 <main>
   <div class="chat">
     <div id="messages"></div>
+    <div id="tgInboxBanner" style="display:none;padding:6px 12px;background:#e8f4fd;border-top:1px solid #bee3f8;font-size:12px;color:#2c5282">📱 <span id="tgInboxText"></span></div>
     <form id="chatForm">
       <input id="message" autocomplete="off" placeholder="输入任务，例如：读取 test_prd.md 并生成总结">
       <button class="primary">发送</button>
@@ -382,6 +433,82 @@ h2{font-size:14px;margin:0 0 8px;color:#555;text-transform:uppercase;letter-spac
       <button id="refreshLogs">刷新</button>
       <div id="logs" class="stack" style="margin-top:8px"></div>
     </section>
+    <section id="communicationSection">
+      <h2>通信连接</h2>
+      <div class="field">
+        <label for="commProvider">渠道</label>
+        <select id="commProvider">
+          <option value="telegram">Telegram</option>
+          <option value="feishu">飞书</option>
+          <option value="lark">Lark</option>
+        </select>
+      </div>
+      <div id="commPanelTelegram" data-provider-panel="telegram">
+        <div id="tgConfiguredInfo" style="display:none;padding:8px;background:#f0faf0;border-radius:6px;margin-bottom:10px;font-size:13px"></div>
+        <div class="field">
+          <label for="tgBotToken">Bot Token</label>
+          <input id="tgBotToken" type="password" placeholder="从 @BotFather 获取">
+        </div>
+        <div class="row">
+          <button id="tgVerifyBtn" type="button">验证</button>
+          <span id="tgVerifyStatus" class="muted"></span>
+        </div>
+        <div id="tgUserIdsBlock" style="margin-top:10px">
+          <div class="field">
+            <label for="tgUserIds">允许的用户 ID</label>
+            <input id="tgUserIds" placeholder="多个用逗号分隔">
+          </div>
+          <div class="row">
+            <button id="tgFetchIdsBtn" type="button">自动获取</button>
+            <span id="tgFetchStatus" class="muted"></span>
+          </div>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <button id="tgSaveBtn" type="button">保存并启用</button>
+          <button id="tgTestBtn" type="button">发送测试消息</button>
+        </div>
+        <div id="tgSaveStatus" class="muted" style="margin-top:6px"></div>
+      </div>
+      <div id="commPanelFeishu" data-provider-panel="feishu" style="display:none">
+        <div id="feishuConfiguredInfo" style="display:none;padding:8px;background:#f0faf0;border-radius:6px;margin-bottom:10px;font-size:13px"></div>
+        <div class="muted" style="margin-bottom:8px">
+          WebSocket 长连接模式：Auctus 会主动连接飞书开放平台，不需要公网地址。请在飞书开放平台的事件订阅中选择「使用长连接接收事件」，订阅 im.message.receive_v1，并开通接收/发送消息权限。
+        </div>
+        <div class="field">
+          <label for="feishuAppId">App ID</label>
+          <input id="feishuAppId" placeholder="cli_xxxxxxxxxxxxxxxx">
+        </div>
+        <div class="field">
+          <label for="feishuAppSecret">App Secret</label>
+          <input id="feishuAppSecret" type="password" placeholder="飞书开放平台 App Secret">
+        </div>
+        <div class="field">
+          <label for="feishuVerifyToken">Verification Token</label>
+          <input id="feishuVerifyToken" placeholder="仅 Webhook 模式需要，可留空">
+        </div>
+        <div class="muted" style="margin-bottom:8px">当前接收模式：WebSocket 长连接。Webhook 地址仅作为高级备用：<code id="feishuWebhookUrl">http://127.0.0.1:8000/webhook/feishu</code></div>
+        <div class="row">
+          <button id="feishuSaveBtn" type="button">保存并启动长连接</button>
+          <span id="feishuSaveStatus" class="muted"></span>
+        </div>
+      </div>
+      <div id="commPanelLark" data-provider-panel="lark" style="display:none">
+        <div id="larkConfiguredInfo" style="display:none;padding:8px;background:#f0faf0;border-radius:6px;margin-bottom:10px;font-size:13px"></div>
+        <div class="muted" style="margin-bottom:8px">Lark 使用 WebSocket 长连接模式，不需要公网地址。请在 Lark Developer Console 选择 Long Connection / WebSocket，订阅 im.message.receive_v1，并开通接收/发送消息权限。</div>
+        <div class="field">
+          <label for="larkAppId">App ID</label>
+          <input id="larkAppId" placeholder="cli_xxxxxxxxxxxxxxxx">
+        </div>
+        <div class="field">
+          <label for="larkAppSecret">App Secret</label>
+          <input id="larkAppSecret" type="password" placeholder="Lark App Secret">
+        </div>
+        <div class="row">
+          <button id="larkSaveBtn" type="button">保存并启动长连接</button>
+          <span id="larkSaveStatus" class="muted"></span>
+        </div>
+      </div>
+    </section>
   </aside>
 <div id="onboardingOverlay" class="overlay">
   <div class="wizard">
@@ -426,14 +553,22 @@ h2{font-size:14px;margin:0 0 8px;color:#555;text-transform:uppercase;letter-spac
           <input id="setupEmail" type="email" autocomplete="email" placeholder="you@example.com">
         </div>
         <div class="field">
-          <label for="setupHostedRegion">服务区域</label>
+          <label for="setupHostedPassword">密码</label>
+          <input id="setupHostedPassword" type="password" autocomplete="current-password" placeholder="账号密码">
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px">
+          <button id="hostedLoginBtn" type="button">登录</button>
+          <span id="hostedLoginStatus" class="muted"></span>
+        </div>
+        <div id="hostedAccountInfo" style="display:none;padding:10px;background:#f0faf0;border:1px solid #c3e6cb;border-radius:6px;margin-bottom:12px;font-size:13px"></div>
+        <div style="display:none">
           <select id="setupHostedRegion">
             <option value="auto">自动选择区域</option>
             <option value="global">海外 Vercel</option>
             <option value="cn">国内阿里云</option>
           </select>
         </div>
-        <div class="muted">本地占位版会记录登录邮箱和免费额度；真实支付在计费网站阶段接入。</div>
+        <div class="muted">登录后自动获取 API Key，调用费用从账号余额中扣除。</div>
       </div>
       <div id="localModelPanel" class="wizard-panel">
         <div class="muted">本地模型不会走云端计费。请确保本机模型服务已启动，并在模型框中填写对应模型名。</div>
@@ -512,6 +647,7 @@ const folderOverlay = document.getElementById('folderOverlay');
 let folderPickerTarget = 'workspacePath';
 let currentFolderPath = '';
 let currentLanguage = 'zh';
+let _hostedApiKey = null;
 const UI = {
   zh: {
     settings: '设置',
@@ -594,7 +730,11 @@ const UI = {
     systemLanguage: '系统语言',
     provider: '服务商',
     loginEmail: '登录邮箱',
-    hostedHint: '本地占位版会记录登录邮箱和免费额度；真实支付在计费网站阶段接入。',
+    hostedPassword: '密码',
+    hostedLoginBtn: '登录',
+    hostedLoginSuccess: (email, balance) => `✓ 登录成功：${email}，余额 ${balance}`,
+    hostedLoginRequired: '请先点击"登录"按钮完成登录',
+    hostedHint: '登录后自动获取 API Key，调用费用从账号余额中扣除。',
     localHint: '本地模型不会走云端计费。请确保本机模型服务已启动，并在模型框中填写对应模型名。',
     agentName: '给 Agent 起个名字',
     agentNamePlaceholder: '可留空',
@@ -700,7 +840,11 @@ const UI = {
     systemLanguage: 'System Language',
     provider: 'Provider',
     loginEmail: 'Login Email',
-    hostedHint: 'This local preview stores your email and free quota. Real payments will be connected in the billing website phase.',
+    hostedPassword: 'Password',
+    hostedLoginBtn: 'Sign In',
+    hostedLoginSuccess: (email, balance) => `✓ Signed in: ${email}, balance ${balance}`,
+    hostedLoginRequired: 'Please sign in first before finishing setup',
+    hostedHint: 'Sign in to get an API Key automatically. Usage is billed from your account balance.',
     localHint: 'Local models do not use cloud billing. Make sure your local model server is running and enter the matching model name.',
     agentName: 'Name Your Agent',
     agentNamePlaceholder: 'Optional',
@@ -868,6 +1012,8 @@ function applyLanguage(language) {
   setText(document.querySelector('label[for="setupHostedRegion"]'), t('hostedRegion'));
   setText(document.querySelector('label[for="setupProvider"]'), t('provider'));
   setText(document.querySelector('label[for="setupEmail"]'), t('loginEmail'));
+  setText(document.querySelector('label[for="setupHostedPassword"]'), t('hostedPassword'));
+  setText(document.getElementById('hostedLoginBtn'), t('hostedLoginBtn'));
   setText(document.querySelector('#hostedApiPanel .muted'), t('hostedHint'));
   setText(document.querySelector('#localModelPanel .muted'), t('localHint'));
   setText(document.querySelector('label[for="agentName"]'), t('agentName'));
@@ -1405,9 +1551,51 @@ document.addEventListener('keydown', (e) => {
 });
 document.getElementById('openSetup').onclick = () => {
   closeSettingsPanel();
+  _hostedApiKey = null;
+  document.getElementById('hostedLoginStatus').textContent = '';
+  document.getElementById('hostedAccountInfo').style.display = 'none';
   overlay.style.display = 'flex';
   updateSetupPanels();
 };
+document.getElementById('hostedLoginBtn').addEventListener('click', async () => {
+  const email = document.getElementById('setupEmail').value.trim();
+  const password = document.getElementById('setupHostedPassword').value;
+  const region = document.getElementById('setupHostedRegion').value;
+  const status = document.getElementById('hostedLoginStatus');
+  const info = document.getElementById('hostedAccountInfo');
+  if (!email || !password) {
+    status.textContent = '请填写邮箱和密码';
+    status.style.color = '#9d1c1c';
+    return;
+  }
+  status.textContent = '登录中…';
+  status.style.color = '#888';
+  info.style.display = 'none';
+  _hostedApiKey = null;
+  try {
+    const r = await fetch('/api/hosted-login', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({email, password, region, base_url: 'http://120.24.223.0'})
+    });
+    const j = await r.json();
+    if (!r.ok) {
+      status.textContent = j.detail || '登录失败，请检查邮箱和密码';
+      status.style.color = '#9d1c1c';
+      return;
+    }
+    _hostedApiKey = j.api_key;
+    const billing = j.billing || {};
+    const balance = billing.balance_cny != null ? `¥${Number(billing.balance_cny).toFixed(2)}` : (billing.balance != null ? `¥${Number(billing.balance).toFixed(2)}` : '—');
+    status.textContent = '✓ 登录成功';
+    status.style.color = '#276749';
+    info.style.display = 'block';
+    info.innerHTML = `<strong>${j.email}</strong>&emsp;账号余额：${balance}`;
+  } catch (err) {
+    status.textContent = '网络错误，请稍后重试';
+    status.style.color = '#9d1c1c';
+  }
+});
 async function loadOnboarding() {
   const r = await fetch('/api/onboarding');
   const j = await r.json();
@@ -1430,15 +1618,22 @@ async function loadOnboarding() {
 document.getElementById('onboardingForm').onsubmit = async (e) => {
   e.preventDefault();
   const mode = document.querySelector('input[name="mode"]:checked').value;
+  const error = document.getElementById('setupError');
+  error.textContent = '';
+  if (mode === 'hosted_api' && !_hostedApiKey) {
+    error.textContent = t('hostedLoginRequired');
+    return;
+  }
   const payload = {
     mode,
     model: document.getElementById('setupModel').value,
     system_language: document.getElementById('setupLanguage').value,
     hosted_region: document.getElementById('setupHostedRegion').value,
+    hosted_base_url: 'http://120.24.223.0',
     permission_scope: document.getElementById('setupPermissionScope').value,
     terminal_access: document.getElementById('setupTerminalAccess').value,
     provider: document.getElementById('setupProvider').value,
-    api_key: document.getElementById('setupApiKey').value.trim(),
+    api_key: mode === 'hosted_api' ? _hostedApiKey : document.getElementById('setupApiKey').value.trim(),
     hosted_email: document.getElementById('setupEmail').value.trim(),
     agent_name: document.getElementById('agentName').value.trim(),
     persona: document.getElementById('persona').value,
@@ -1446,8 +1641,6 @@ document.getElementById('onboardingForm').onsubmit = async (e) => {
     workspace_path: document.getElementById('setupWorkspacePath').value.trim(),
     save_profile: document.getElementById('saveProfile').checked
   };
-  const error = document.getElementById('setupError');
-  error.textContent = '';
   if (mode === 'own_api' && payload.api_key) {
     const valid = await validateApiKey({
       provider: payload.provider,
@@ -1465,12 +1658,9 @@ document.getElementById('onboardingForm').onsubmit = async (e) => {
     return;
   }
   overlay.style.display = 'none';
+  _hostedApiKey = null;
   applyLanguage(j.system_language || payload.system_language || currentLanguage);
-  if (mode === 'hosted_api' && j.route === 'local') {
-    addMessage(t('hostedPreview'), 'agent');
-  } else {
-    addMessage(t('setupDone'), 'agent');
-  }
+  addMessage(t('setupDone'), 'agent');
 	  if (j.candidate_memory_ids && j.candidate_memory_ids.length) {
 	    addMessage(t('profileSaved'), 'agent');
 	  }
@@ -1480,6 +1670,186 @@ document.getElementById('onboardingForm').onsubmit = async (e) => {
   refreshMemories();
 };
 document.getElementById('refreshLogs').onclick = refreshLogs;
+
+// ── Communication provider switch ──────────────────────────────────────────
+const COMM_PROVIDERS = [
+  {id: 'telegram', panel: 'commPanelTelegram'},
+  {id: 'feishu', panel: 'commPanelFeishu'},
+  {id: 'lark', panel: 'commPanelLark'},
+];
+function showCommunicationProvider(provider) {
+  const selected = COMM_PROVIDERS.some(p => p.id === provider) ? provider : 'telegram';
+  COMM_PROVIDERS.forEach(p => {
+    const panel = document.getElementById(p.panel);
+    if (panel) panel.style.display = p.id === selected ? '' : 'none';
+  });
+}
+const commProvider = document.getElementById('commProvider');
+if (commProvider) {
+  commProvider.addEventListener('change', () => showCommunicationProvider(commProvider.value));
+  showCommunicationProvider(commProvider.value);
+}
+
+// ── Telegram settings ──────────────────────────────────────────────────────
+async function loadTelegramConfig() {
+  const r = await fetch('/api/telegram/config');
+  if (!r.ok) return;
+  const j = await r.json();
+  const info = document.getElementById('tgConfiguredInfo');
+  if (j.configured) {
+    info.style.display = 'block';
+    info.textContent = `✓ 已配置 Bot Token：${j.token_hint}  允许用户：${j.allowed_user_ids || '(未限制)'}`;
+    document.getElementById('tgUserIds').value = j.allowed_user_ids || '';
+  } else {
+    info.style.display = 'none';
+  }
+}
+document.getElementById('tgVerifyBtn').addEventListener('click', async () => {
+  const token = document.getElementById('tgBotToken').value.trim();
+  const status = document.getElementById('tgVerifyStatus');
+  if (!token) { status.textContent = '请先填写 Bot Token'; return; }
+  status.textContent = '验证中…';
+  const r = await fetch('/api/telegram/verify-token', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({bot_token: token, allowed_user_ids: ''})});
+  const j = await r.json();
+  if (j.ok) {
+    status.textContent = `✓ 验证成功：@${j.username}`;
+    status.style.color = '#276749';
+  } else {
+    status.textContent = `✗ ${j.error || '验证失败'}`;
+    status.style.color = '#9d1c1c';
+  }
+});
+document.getElementById('tgFetchIdsBtn').addEventListener('click', async () => {
+  const token = document.getElementById('tgBotToken').value.trim();
+  const status = document.getElementById('tgFetchStatus');
+  if (!token) { status.textContent = '请先填写 Bot Token'; return; }
+  status.textContent = '获取中…';
+  const r = await fetch('/api/telegram/fetch-updates', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({bot_token: token, allowed_user_ids: ''})});
+  const j = await r.json();
+  if (j.ok && j.user_ids && j.user_ids.length) {
+    const ids = j.user_ids.map(u => u.id).join(',');
+    document.getElementById('tgUserIds').value = ids;
+    status.textContent = `✓ 找到 ${j.user_ids.length} 个用户：${j.user_ids.map(u => u.name).join('、')}`;
+    status.style.color = '#276749';
+  } else {
+    status.textContent = j.ok ? '未找到用户，请先向 Bot 发送一条消息再重试' : `✗ ${j.error}`;
+    status.style.color = j.ok ? '#888' : '#9d1c1c';
+  }
+});
+document.getElementById('tgSaveBtn').addEventListener('click', async () => {
+  const token = document.getElementById('tgBotToken').value.trim();
+  const ids = document.getElementById('tgUserIds').value.trim();
+  const status = document.getElementById('tgSaveStatus');
+  if (!token) { status.textContent = '请先填写 Bot Token'; return; }
+  status.textContent = '保存中…';
+  const r = await fetch('/api/telegram/save', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({bot_token: token, allowed_user_ids: ids})});
+  const j = await r.json();
+  if (j.ok) {
+    status.textContent = `✓ 已保存，Bot 用户名：@${j.username}`;
+    status.style.color = '#276749';
+    loadTelegramConfig();
+  } else {
+    status.textContent = `✗ ${j.detail || '保存失败'}`;
+    status.style.color = '#9d1c1c';
+  }
+});
+document.getElementById('tgTestBtn').addEventListener('click', async () => {
+  const token = document.getElementById('tgBotToken').value.trim();
+  const ids = document.getElementById('tgUserIds').value.trim();
+  const status = document.getElementById('tgSaveStatus');
+  status.textContent = '发送中…';
+  const r = await fetch('/api/telegram/test-message', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({bot_token: token, allowed_user_ids: ids})});
+  const j = await r.json();
+  status.textContent = j.ok ? '✓ 测试消息已发送，请检查手机' : `✗ ${j.detail || '发送失败'}`;
+  status.style.color = j.ok ? '#276749' : '#9d1c1c';
+});
+
+// ── Feishu settings ────────────────────────────────────────────────────────
+async function loadFeishuConfig() {
+  const r = await fetch('/api/feishu/config');
+  if (!r.ok) return;
+  const j = await r.json();
+  const info = document.getElementById('feishuConfiguredInfo');
+  if (j.configured) {
+    info.style.display = 'block';
+    info.textContent = `✓ 已配置飞书应用：${j.app_id}`;
+    if ((j.domain || 'feishu') === 'feishu') document.getElementById('feishuAppId').value = j.app_id || '';
+  } else {
+    info.style.display = 'none';
+  }
+  const larkInfo = document.getElementById('larkConfiguredInfo');
+  if (larkInfo) {
+    if (j.configured && j.domain === 'lark') {
+      larkInfo.style.display = 'block';
+      larkInfo.textContent = `✓ 已配置 Lark 应用：${j.app_id}`;
+      document.getElementById('larkAppId').value = j.app_id || '';
+    } else {
+      larkInfo.style.display = 'none';
+    }
+  }
+  const wh = document.getElementById('feishuWebhookUrl');
+  if (wh) wh.textContent = j.webhook_url || 'http://127.0.0.1:8000/webhook/feishu';
+}
+document.getElementById('feishuSaveBtn').addEventListener('click', async () => {
+  const app_id = document.getElementById('feishuAppId').value.trim();
+  const app_secret = document.getElementById('feishuAppSecret').value.trim();
+  const verification_token = document.getElementById('feishuVerifyToken').value.trim();
+  const status = document.getElementById('feishuSaveStatus');
+  if (!app_id || !app_secret) { status.textContent = '请填写 App ID 和 App Secret'; return; }
+  status.textContent = '验证中…';
+  const r = await fetch('/api/feishu/save', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({app_id, app_secret, verification_token, receive_mode: 'websocket', domain: 'feishu'})});
+  const j = await r.json();
+  if (j.ok) {
+    status.textContent = `✓ 飞书配置已保存，长连接已启动：${app_id}`;
+    status.style.color = '#276749';
+    loadFeishuConfig();
+  } else {
+    status.textContent = `✗ ${j.detail || '保存失败'}`;
+    status.style.color = '#9d1c1c';
+  }
+});
+document.getElementById('larkSaveBtn').addEventListener('click', async () => {
+  const app_id = document.getElementById('larkAppId').value.trim();
+  const app_secret = document.getElementById('larkAppSecret').value.trim();
+  const status = document.getElementById('larkSaveStatus');
+  if (!app_id || !app_secret) { status.textContent = '请填写 App ID 和 App Secret'; return; }
+  status.textContent = '验证中…';
+  const r = await fetch('/api/feishu/save', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({app_id, app_secret, verification_token: '', receive_mode: 'websocket', domain: 'lark'})});
+  const j = await r.json();
+  if (j.ok) {
+    status.textContent = `✓ Lark 配置已保存，长连接已启动：${app_id}`;
+    status.style.color = '#276749';
+    document.getElementById('larkAppSecret').value = '';
+    loadFeishuConfig();
+  } else {
+    status.textContent = `✗ ${j.detail || '保存失败'}`;
+    status.style.color = '#9d1c1c';
+  }
+});
+
+// ── Telegram inbox polling ─────────────────────────────────────────────────
+let _tgInboxLastId = 0;
+async function pollTelegramInbox() {
+  try {
+    const r = await fetch(`/api/telegram/inbox?since=${_tgInboxLastId}`);
+    if (!r.ok) return;
+    const j = await r.json();
+    if (j.messages && j.messages.length) {
+      j.messages.forEach(m => {
+        if (m.id > _tgInboxLastId) _tgInboxLastId = m.id;
+        const prefix = m.direction === 'in' ? `📱 ${m.from_user || 'Telegram'}：` : '🤖 Agent：';
+        addMessage(prefix + m.text, m.direction === 'in' ? 'user' : 'agent');
+      });
+      const banner = document.getElementById('tgInboxBanner');
+      const text = document.getElementById('tgInboxText');
+      banner.style.display = 'block';
+      text.textContent = `收到 ${j.messages.length} 条 Telegram 消息`;
+      setTimeout(() => { banner.style.display = 'none'; }, 4000);
+    }
+  } catch (_) {}
+}
+setInterval(pollTelegramInbox, 5000);
+
 async function init() {
   await loadLanguage();
   await loadHostedRegion();
@@ -1492,6 +1862,8 @@ async function init() {
   await refreshLogs();
   await refreshMemories();
   await loadOnboarding();
+  await loadTelegramConfig();
+  await loadFeishuConfig();
 }
 init();
 </script>
@@ -1673,6 +2045,21 @@ class PermissionScopeIn(BaseModel):
 
 class TerminalAccessIn(BaseModel):
     access: str
+
+
+class TerminalSessionStartIn(BaseModel):
+    command: str
+    working_directory: Optional[str] = None
+    label: str = ""
+
+
+class TerminalSessionSendIn(BaseModel):
+    text: str
+    append_newline: bool = True
+
+
+class TerminalSessionStopIn(BaseModel):
+    force: bool = False
 
 
 class CalendarAccessIn(BaseModel):
@@ -1987,7 +2374,7 @@ def chat(body: ChatIn) -> ChatOut:
             # 给 LLM 明确“已授权”的信号，减少“需要你在当前消息明确授权”的二次卡顿
             message = (
                 f"【已授权：终端命令={terminal_permission}】\n"
-                "你可以调用 run_terminal_command 执行命令；参数里务必包含 confirmed:true。\n"
+                "你可以调用 run_terminal_command 执行短命令，或调用 terminal_session_start/send/stop 管理长期终端任务；高风险终端工具参数里务必包含 confirmed:true。\n"
                 "删除类操作默认必须“移到废纸篓/回收站（可恢复）”，不要直接 rm；只有用户明确要求“永久/彻底删除”时才允许 rm。\n\n"
                 + message
             )
@@ -2238,6 +2625,54 @@ def set_terminal_access(body: TerminalAccessIn) -> dict:
     }
 
 
+@app.get("/api/terminal-sessions")
+def api_terminal_sessions() -> dict:
+    return tools.terminal_session_list()
+
+
+@app.post("/api/terminal-sessions")
+def api_terminal_session_start(body: TerminalSessionStartIn) -> dict:
+    result = tools.terminal_session_start(
+        command=body.command,
+        working_directory=body.working_directory,
+        label=body.label,
+    )
+    if result.get("error"):
+        raise HTTPException(400, result["error"])
+    return result
+
+
+@app.get("/api/terminal-sessions/{session_id}")
+def api_terminal_session_tail(
+    session_id: str,
+    lines: int = Query(80, ge=1, le=500),
+) -> dict:
+    result = tools.terminal_session_tail(session_id=session_id, lines=lines)
+    if result.get("error"):
+        raise HTTPException(404, result["error"])
+    return result
+
+
+@app.post("/api/terminal-sessions/{session_id}/send")
+def api_terminal_session_send(session_id: str, body: TerminalSessionSendIn) -> dict:
+    result = tools.terminal_session_send(
+        session_id=session_id,
+        text=body.text,
+        append_newline=body.append_newline,
+    )
+    if result.get("error"):
+        raise HTTPException(400, result["error"])
+    return result
+
+
+@app.post("/api/terminal-sessions/{session_id}/stop")
+def api_terminal_session_stop(session_id: str, body: TerminalSessionStopIn) -> dict:
+    result = tools.terminal_session_stop(session_id=session_id, force=body.force)
+    if result.get("error"):
+        raise HTTPException(400, result["error"])
+    return result
+
+
 @app.get("/api/calendar-access")
 def get_calendar_access() -> dict:
     state = accounting.get_setup_state()
@@ -2459,6 +2894,11 @@ def save_telegram_config(body: TelegramConfigIn) -> dict:
         raise HTTPException(500, f"写入 .env 失败：{e}")
     settings.telegram_bot_token = token
     settings.telegram_allowed_user_ids = ids
+    try:
+        from . import telegram_bot as _tg_bot
+        _tg_bot.run_in_thread()
+    except Exception as exc:
+        raise HTTPException(500, f"Telegram 配置已保存，但启动 Bot 失败：{type(exc).__name__}: {exc}")
     bot = verify.get("result", {})
     return {"ok": True, "username": bot.get("username", ""), "name": bot.get("first_name", "")}
 
@@ -2477,6 +2917,165 @@ def send_telegram_test(body: TelegramConfigIn) -> dict:
         r = _tg_api(token, "sendMessage", {"chat_id": uid, "text": "✅ Auctus Agent 已成功连接 Telegram！"})
         results.append({"user_id": uid, "ok": r.get("ok"), "error": r.get("description", "")})
     return {"ok": all(r["ok"] for r in results), "results": results}
+
+
+@app.get("/api/telegram/inbox")
+def telegram_inbox(since: int = Query(0)) -> dict:
+    msgs = accounting.get_telegram_inbox_messages(since_id=since)
+    return {"messages": msgs}
+
+
+# ── Feishu config ──────────────────────────────────────────────────────────
+
+class FeishuConfigIn(BaseModel):
+    app_id: str
+    app_secret: str
+    verification_token: str = ""
+    receive_mode: str = "websocket"
+    domain: str = "feishu"
+
+
+@app.get("/api/feishu/config")
+def get_feishu_config(request: Request) -> dict:
+    state = accounting.get_setup_state()
+    app_id = state.get("feishu_app_id", "")
+    mode = state.get("feishu_receive_mode", "websocket")
+    domain = state.get("feishu_domain", "feishu")
+    base = str(request.base_url).rstrip("/")
+    return {
+        "configured": bool(app_id),
+        "app_id": app_id,
+        "receive_mode": mode,
+        "domain": domain,
+        "connection_hint": "长连接 WebSocket 模式：Auctus Agent 会主动连接飞书开放平台，不需要公网地址。",
+        "webhook_url": f"{base}/webhook/feishu",
+    }
+
+
+@app.post("/api/feishu/save")
+def save_feishu_config(body: FeishuConfigIn) -> dict:
+    import urllib.request as _ur, json as _json
+    app_id = body.app_id.strip()
+    app_secret = body.app_secret.strip()
+    receive_mode = (body.receive_mode or "websocket").strip().lower()
+    domain = (body.domain or "feishu").strip().lower()
+    if not app_id or not app_secret:
+        raise HTTPException(400, "app_id 和 app_secret 是必填项")
+    if receive_mode not in {"websocket", "webhook"}:
+        raise HTTPException(400, "receive_mode 必须是 websocket 或 webhook")
+    if domain not in {"feishu", "lark"}:
+        raise HTTPException(400, "domain 必须是 feishu 或 lark")
+    api_host = "open.larksuite.com" if domain == "lark" else "open.feishu.cn"
+    url = f"https://{api_host}/open-apis/auth/v3/tenant_access_token/internal"
+    data = _json.dumps({"app_id": app_id, "app_secret": app_secret}).encode()
+    req = _ur.Request(url, data=data, headers={"Content-Type": "application/json"})
+    try:
+        with _ur.urlopen(req, timeout=8) as resp:
+            result = _json.loads(resp.read())
+    except Exception as e:
+        raise HTTPException(502, f"无法连接飞书服务：{e}")
+    if result.get("code") != 0:
+        raise HTTPException(400, f"飞书验证失败：{result.get('msg', '未知错误')}")
+    accounting.set_setup_state({
+        "feishu_app_id": app_id,
+        "feishu_app_secret": app_secret,
+        "feishu_verification_token": body.verification_token.strip(),
+        "feishu_receive_mode": receive_mode,
+        "feishu_domain": domain,
+    })
+    if receive_mode == "websocket":
+        try:
+            from . import feishu_bot as _feishu_bot
+            _feishu_bot.run_in_thread()
+        except Exception as exc:
+            raise HTTPException(500, f"飞书配置已保存，但启动长连接失败：{type(exc).__name__}: {exc}")
+    return {
+        "ok": True,
+        "app_id": app_id,
+        "receive_mode": receive_mode,
+        "domain": domain,
+        "message": "已保存。WebSocket 长连接模式不需要公网地址；请在飞书开放平台选择长连接接收事件并订阅 im.message.receive_v1。",
+    }
+
+
+@app.post("/webhook/feishu")
+async def feishu_webhook(request: Request) -> dict:
+    """Receive Feishu event subscription messages."""
+    import json as _json
+    body_bytes = await request.body()
+    try:
+        payload = _json.loads(body_bytes)
+    except Exception:
+        raise HTTPException(400, "invalid JSON")
+
+    state = accounting.get_setup_state()
+    verify_token = state.get("feishu_verification_token", "")
+
+    if verify_token and payload.get("token") != verify_token:
+        raise HTTPException(401, "verification token mismatch")
+
+    if payload.get("type") == "url_verification":
+        return {"challenge": payload.get("challenge", "")}
+
+    event = payload.get("event", {})
+    msg = event.get("message", {})
+    sender = event.get("sender", {})
+    text_content = ""
+    try:
+        content = _json.loads(msg.get("content", "{}"))
+        text_content = content.get("text", "").strip()
+    except Exception:
+        pass
+
+    if not text_content:
+        return {"ok": True}
+
+    sender_id = (sender.get("sender_id") or {}).get("open_id") or (sender.get("sender_id") or {}).get("user_id") or "feishu_user"
+    session_id = f"feishu-{sender_id}"
+
+    accounting.add_telegram_inbox_message("in", text_content, from_user=f"飞书:{sender_id}")
+
+    import threading
+    def _reply():
+        try:
+            result = agent.chat(session_id, text_content)
+            reply = result.get("reply", "")
+            if not reply:
+                return
+            accounting.add_telegram_inbox_message("out", reply, from_user="agent")
+            app_id = state.get("feishu_app_id", "")
+            app_secret = state.get("feishu_app_secret", "")
+            if not app_id or not app_secret:
+                return
+            import urllib.request as _ur2
+            token_url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
+            token_data = _json.dumps({"app_id": app_id, "app_secret": app_secret}).encode()
+            token_req = _ur2.Request(token_url, data=token_data, headers={"Content-Type": "application/json"})
+            with _ur2.urlopen(token_req, timeout=8) as r:
+                token_resp = _json.loads(r.read())
+            access_token = token_resp.get("tenant_access_token", "")
+            if not access_token:
+                return
+            chat_id = msg.get("chat_id", "")
+            if not chat_id:
+                return
+            send_url = "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id"
+            send_data = _json.dumps({
+                "receive_id": chat_id,
+                "msg_type": "text",
+                "content": _json.dumps({"text": reply}),
+            }).encode()
+            send_req = _ur2.Request(send_url, data=send_data, headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {access_token}",
+            })
+            _ur2.urlopen(send_req, timeout=10)
+        except Exception as e:
+            import logging
+            logging.getLogger("feishu").exception("Feishu reply failed: %s", e)
+
+    threading.Thread(target=_reply, daemon=True).start()
+    return {"ok": True}
 
 
 @app.get("/api/workspace")
@@ -2546,6 +3145,106 @@ def billing_state() -> dict:
 @app.get("/healthz")
 def health():
     return {"ok": True, "model": settings.model, "route": accounting.current_route()}
+
+
+@app.get("/api/pairing-info")
+def pairing_info():
+    """Returns the data needed to generate a mobile pairing QR code."""
+    relay_url = settings.mobile_relay_url or ""
+    device_token = settings.mobile_relay_device_token or ""
+    configured = bool(relay_url and device_token)
+    return {
+        "configured": configured,
+        "relay_url": relay_url,
+        "device_token": device_token,
+    }
+
+
+@app.get("/api/pairing-qr")
+def pairing_qr():
+    """Returns the pairing QR code as an SVG image (no CDN needed)."""
+    import io
+    try:
+        import qrcode
+        import qrcode.image.svg
+    except ImportError:
+        raise HTTPException(503, "qrcode package not installed")
+
+    relay_url = settings.mobile_relay_url or ""
+    device_token = settings.mobile_relay_device_token or ""
+    if not relay_url or not device_token:
+        raise HTTPException(404, "Relay not configured")
+
+    import json as _json
+    payload = _json.dumps({"relay": relay_url, "token": device_token})
+    factory = qrcode.image.svg.SvgImage
+    img = qrcode.make(payload, image_factory=factory, box_size=8, border=2)
+    buf = io.BytesIO()
+    img.save(buf)
+    return Response(content=buf.getvalue(), media_type="image/svg+xml")
+
+
+@app.get("/pair", response_class=HTMLResponse)
+def pair_page():
+    relay_url = settings.mobile_relay_url or ""
+    device_token = settings.mobile_relay_device_token or ""
+    configured = bool(relay_url and device_token)
+
+    if not configured:
+        qr_section = """<div style="color:#f85149;padding:20px;font-size:14px">
+            中继服务未配置<br>
+            <small style="color:#8b949e">请在 .env 中设置 MOBILE_RELAY_URL 和 MOBILE_RELAY_ADMIN_SECRET</small>
+        </div>"""
+        token_text = "未配置"
+    else:
+        qr_section = '<img src="/api/pairing-qr" width="240" height="240" alt="QR Code" style="display:block">'
+        token_text = device_token
+
+    return HTMLResponse(content=f"""<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Auctus Agent — 手机配对</title>
+<style>
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+         background: #0d1117; color: #e6edf3; min-height: 100vh;
+         display: flex; align-items: center; justify-content: center; }}
+  .card {{ background: #161b22; border: 1px solid #30363d; border-radius: 16px;
+           padding: 40px; text-align: center; max-width: 420px; width: 90%; }}
+  h1 {{ font-size: 20px; font-weight: 600; margin-bottom: 8px; }}
+  .sub {{ color: #8b949e; font-size: 14px; margin-bottom: 32px; line-height: 1.5; }}
+  .qr-wrap {{ background: #fff; border-radius: 12px; padding: 16px;
+              display: inline-block; margin-bottom: 24px; }}
+  .token-box {{ background: #0d1117; border: 1px solid #30363d; border-radius: 8px;
+                padding: 10px 14px; font-family: monospace; font-size: 11px;
+                color: #8b949e; word-break: break-all; margin-bottom: 24px; }}
+  .steps {{ text-align: left; background: #0d1117; border-radius: 8px;
+            padding: 16px; font-size: 13px; color: #8b949e; line-height: 2; }}
+  .steps b {{ color: #e6edf3; }}
+  .btn {{ display: inline-block; margin-top: 20px; padding: 10px 24px;
+          background: #238636; color: #fff; border-radius: 8px; text-decoration: none;
+          font-size: 14px; }}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>手机配对</h1>
+  <p class="sub">用 Auctus Agent 手机 App 扫描下方二维码<br>一次配对，永久有效</p>
+  <div class="qr-wrap">{qr_section}</div>
+  <div class="token-box">Token: {token_text}</div>
+  <div class="steps">
+    <b>配对步骤：</b><br>
+    1. 下载 Auctus Agent 手机 App<br>
+    2. 打开 App → 点击「扫码配对」<br>
+    3. 扫描上方二维码<br>
+    4. 完成！之后打开 App 无需重新扫码
+  </div>
+  <a href="/" class="btn">返回</a>
+</div>
+</body>
+</html>""")
 
 
 def _safe_input_filename(filename: str) -> str:

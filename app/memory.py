@@ -17,7 +17,13 @@ import uuid
 from contextlib import contextmanager
 from typing import Iterable, Optional
 
-import chromadb
+try:
+    import chromadb as _chromadb_mod
+    _CHROMADB_AVAILABLE = True
+except Exception:
+    _chromadb_mod = None  # type: ignore
+    _CHROMADB_AVAILABLE = False
+
 from sqlalchemy import (
     Column, Integer, String, Text, Float, create_engine, select, inspect, text,
 )
@@ -104,8 +110,22 @@ def db_session():
 
 # ---------- Chroma 向量库 ----------
 
-_chroma = chromadb.PersistentClient(path=str(settings.data_dir / "chroma"))
-_episodic = _chroma.get_or_create_collection("episodic")
+_chroma = None
+_episodic = None
+
+
+def _get_episodic():
+    global _chroma, _episodic
+    if _episodic is not None:
+        return _episodic
+    if not _CHROMADB_AVAILABLE:
+        return None
+    try:
+        _chroma = _chromadb_mod.PersistentClient(path=str(settings.data_dir / "chroma"))
+        _episodic = _chroma.get_or_create_collection("episodic")
+        return _episodic
+    except Exception:
+        return None
 
 
 # ---------- 会话历史 ----------
@@ -213,7 +233,7 @@ def remember(
     text_for_embed = f"{key}: {value}"
     try:
         vec = llm.embed([text_for_embed])[0]
-        _episodic.add(
+        _get_episodic().add(
             ids=[fact_id],
             documents=[text_for_embed],
             metadatas=[{
@@ -264,7 +284,7 @@ def confirm_memory(fact_id: str) -> dict:
         }
     # 同步更新 Chroma
     try:
-        _episodic.update(
+        _get_episodic().update(
             ids=[fact_id],
             metadatas=[merged_metadata],
         )
@@ -286,7 +306,7 @@ def forget(fact_id: str) -> dict:
             return {"ok": False, "error": "memory not found"}
         s.delete(row)
     try:
-        _episodic.delete(ids=[fact_id])
+        _get_episodic().delete(ids=[fact_id])
     except Exception:
         pass
     return {"ok": True, "id": fact_id}
@@ -328,7 +348,7 @@ def recall(query: str, top_k: int = 5) -> list[dict]:
     now = time.time()
     try:
         vec = llm.embed([query])[0]
-        res = _episodic.query(query_embeddings=[vec], n_results=top_k * 2)
+        res = _get_episodic().query(query_embeddings=[vec], n_results=top_k * 2)
     except Exception:
         # 无嵌入模型时退化为关键词 LIKE
         with db_session() as s:

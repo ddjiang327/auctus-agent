@@ -230,7 +230,7 @@ def _workspace_context() -> str:
         "[当前文件权限]\n"
         f"- 当前已授权 workspace: {workspace}\n"
         f"{scope_text}"
-        f"- 当前终端命令权限：{terminal_access}。只有 enabled 且用户明确要求执行命令时，才可以使用 run_terminal_command。\n"
+        f"- 当前终端命令权限：{terminal_access}。只有 enabled 且用户明确要求执行命令时，才可以使用 run_terminal_command 或 terminal_session_* 工具。\n"
         "- 当用户说“这个文件夹”“当前文件夹”“授权文件夹”“workspace”或类似表达时，"
         "默认指这个 workspace。\n"
         "- 在当前 workspace 里创建或修改文本文件时，优先使用相对路径调用 write_file，"

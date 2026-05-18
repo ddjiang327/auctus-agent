@@ -17,101 +17,98 @@ function Fail {
   param([string]$Step, [string]$Detail = "")
   Write-Host ""
   Write-Host "========================================================" -ForegroundColor Red
-  Write-Host "  安装失败：$Step" -ForegroundColor Red
+  Write-Host "  Installation failed: $Step" -ForegroundColor Red
   Write-Host "========================================================" -ForegroundColor Red
   Write-Host ""
 
   switch -Wildcard ($Step) {
-    "*找不到*Python*" {
-      Write-Host "  【问题】找不到 Python 或 Python 未正确安装"
+    "*Python not found*" {
+      Write-Host "  [Problem] Python is not installed or not found"
       Write-Host ""
-      Write-Host "  【解决步骤】"
-      Write-Host "  1. 下载 Python 3.10 或更新版本："
+      Write-Host "  [Fix]"
+      Write-Host "  1. Download Python 3.10 or later:"
       Write-Host "     https://www.python.org/downloads/"
-      Write-Host "  2. 运行安装程序，务必勾选："
-      Write-Host "     ☑ Add Python to PATH"
-      Write-Host "     ☑ Install pip"
-      Write-Host "  3. 安装完成后，重新双击 Setup.bat"
+      Write-Host "  2. Run the installer and make sure to check:"
+      Write-Host "     [x] Add Python to PATH"
+      Write-Host "     [x] Install pip"
+      Write-Host "  3. After installing, double-click Setup.bat again"
       Write-Host ""
-      Write-Host "  【验证安装】安装完成后，在命令行运行：python --version"
+      Write-Host "  [Verify] Run in Command Prompt: python --version"
     }
-    "*Python 版本*" {
-      Write-Host "  【问题】Python 版本过低"
+    "*Python version*" {
+      Write-Host "  [Problem] Python version is too old"
       Write-Host ""
-      Write-Host "  当前需要 Python 3.10 或更高版本。"
-      Write-Host "  请从以下地址下载最新版："
+      Write-Host "  Python 3.10 or later is required."
+      Write-Host "  Please download the latest version from:"
       Write-Host "     https://www.python.org/downloads/"
     }
-    "*权限*" {
-      Write-Host "  【问题】没有足够权限完成安装"
+    "*permission*" {
+      Write-Host "  [Problem] Insufficient permissions to complete installation"
       Write-Host ""
-      Write-Host "  【解决方法】"
-      Write-Host "  1. 右键点击 Setup.bat"
-      Write-Host "  2. 选择「以管理员身份运行」"
+      Write-Host "  [Fix]"
+      Write-Host "  1. Right-click Setup.bat"
+      Write-Host "  2. Select 'Run as administrator'"
       Write-Host ""
-      Write-Host "  如果问题仍然存在，可能是杀毒软件阻止了安装。"
+      Write-Host "  If the problem persists, your antivirus may be blocking the install."
     }
     "*venv*" {
-      Write-Host "  【问题】无法创建虚拟环境"
+      Write-Host "  [Problem] Cannot create virtual environment"
       Write-Host ""
-      Write-Host "  可能原因："
-      Write-Host "  1. 之前安装中断，残留了损坏的 .venv 文件夹"
-      Write-Host "  2. 权限不足"
+      Write-Host "  Possible causes:"
+      Write-Host "  1. A previous install was interrupted, leaving a broken .venv folder"
+      Write-Host "  2. Insufficient permissions"
       Write-Host ""
-      Write-Host "  【解决方法】"
-      Write-Host "  1. 关闭所有命令行窗口"
-      Write-Host "  2. 删除 .venv 文件夹（如果存在）"
-      Write-Host "  3. 重新双击 Setup.bat"
+      Write-Host "  [Fix]"
+      Write-Host "  1. Close all command-line windows"
+      Write-Host "  2. Delete the .venv folder (if it exists)"
+      Write-Host "  3. Double-click Setup.bat again"
     }
-    "*依赖*安装失败*" {
-      Write-Host "  【问题】依赖安装失败"
+    "*Dependency install failed*" {
+      Write-Host "  [Problem] Dependency installation failed"
       Write-Host ""
-      Write-Host "  可能原因："
-      Write-Host "  1. 网络连接不稳定（推荐使用稳定的网络）"
-      Write-Host "  2. pip 源被屏蔽（国内用户可能需要换源）"
-      Write-Host "  3. 磁盘空间不足"
+      Write-Host "  Possible causes:"
+      Write-Host "  1. Unstable network connection"
+      Write-Host "  2. Insufficient disk space"
       Write-Host ""
-      Write-Host "  【解决方法】"
-      Write-Host "  1. 检查网络后重试"
-      Write-Host "  2. 如果是国内用户，可以手动设置 pip 镜像源："
-      Write-Host "     pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple"
-      Write-Host "  3. 确认磁盘有至少 1GB 可用空间"
+      Write-Host "  [Fix]"
+      Write-Host "  1. Check your network and retry"
+      Write-Host "  2. Make sure you have at least 1GB of free disk space"
     }
-    "*超时*" {
-      Write-Host "  【问题】安装超时"
+    "*timeout*" {
+      Write-Host "  [Problem] Installation timed out"
       Write-Host ""
-      Write-Host "  依赖下载时间较长，可能是因为网络较慢。"
-      Write-Host "  请确保网络稳定后重试。"
+      Write-Host "  Download is taking too long, possibly due to a slow network."
+      Write-Host "  Please ensure a stable connection and retry."
     }
-    "*路径*" {
-      Write-Host "  【问题】项目路径有问题"
+    "*path*" {
+      Write-Host "  [Problem] Project path issue"
       Write-Host ""
-      Write-Host "  当前路径：$ProjectDir"
-      Write-Host "  请确保："
-      Write-Host "  1. 不要把项目放在桌面深层嵌套的文件夹中"
-      Write-Host "  2. 路径中不要包含特殊字符或中文（如果可能）"
+      Write-Host "  Current path: $ProjectDir"
+      Write-Host "  Please make sure:"
+      Write-Host "  1. The project is not in a deeply nested folder"
+      Write-Host "  2. The path does not contain special characters"
     }
     default {
-      Write-Host "  【问题】安装时遇到未知错误"
+      Write-Host "  [Problem] Unknown error during installation"
       if ($Detail) {
         Write-Host ""
-        Write-Host "  错误详情："
+        Write-Host "  Error details:"
         Write-Host "  $Detail"
       }
       Write-Host ""
-      Write-Host "  【一般解决步骤】"
-      Write-Host "  1. 关闭所有命令行窗口"
-      Write-Host "  2. 删除 .venv 文件夹（如果存在）"
-      Write-Host "  3. 重新双击 Setup.bat"
+      Write-Host "  [General fix]"
+      Write-Host "  1. Close all command-line windows"
+      Write-Host "  2. Delete the .venv folder (if it exists)"
+      Write-Host "  3. Double-click Setup.bat again"
       Write-Host ""
-      Write-Host "  如果问题持续，请截图此错误信息并联系支持。"
+      Write-Host "  If the problem persists, screenshot this error and contact support."
     }
   }
 
   Write-Host ""
   Write-Host "========================================================" -ForegroundColor Red
   Write-Host ""
-  Write-Host "按回车键关闭..."
+  Write-Host "Press Enter to close..."
   Read-Host
   exit 1
 }
@@ -124,8 +121,8 @@ function Check-DiskSpace {
     $freeSpace = (Get-PSDrive -Name $drive.TrimEnd(':')).Free
     $minSpace = 500MB
     if ($freeSpace -lt $minSpace) {
-      Write-Warn "磁盘空间不足：剩余 $([math]::Round($freeSpace/1MB))MB"
-      Write-Info "建议至少保留 500MB 可用空间"
+      Write-Warn "Low disk space: $([math]::Round($freeSpace/1MB))MB remaining"
+      Write-Info "At least 500MB of free space is recommended"
     }
   } catch { }
 }
@@ -182,21 +179,21 @@ function Resolve-PythonCommand {
 # ── Step 0: Pre-flight checks ─────────────────────────────────────────────────
 Write-Host ""
 Write-Host "═══════════════════════════════════════════════════════" -ForegroundColor Cyan
-Write-Host "  Auctus Agent 安装程序" -ForegroundColor Cyan
+Write-Host "  Auctus Agent Installer" -ForegroundColor Cyan
 Write-Host "═══════════════════════════════════════════════════════" -ForegroundColor Cyan
 Write-Host ""
-Write-Info "检查系统环境..."
+Write-Info "Checking system requirements..."
 
 Check-DiskSpace
 
 # ── Step 1: Python check ──────────────────────────────────────────────────────
 Write-Host ""
-Write-Info "检查 Python..."
+Write-Info "Checking Python..."
 
 $pythonCmd = Resolve-PythonCommand
 
 if ($null -eq $pythonCmd) {
-  Fail "找不到 Python" "系统未找到 python/python3 命令"
+  Fail "Python not found" "python/python3 command not found on this system"
 }
 
 # Check Python version
@@ -204,84 +201,93 @@ try {
   $versionInfo = & $pythonCmd -c "import sys; print(sys.version_info.major, sys.version_info.minor)"
   $major, $minor = $versionInfo -split ' '
   if ([int]$major -lt 3 -or ([int]$major -eq 3 -and [int]$minor -lt 10)) {
-    Fail "Python 版本过低" "当前版本：$major.$minor，需要 3.10 或更高"
+    Fail "Python version too old" "Found $major.$minor, need 3.10 or later"
   }
-  Write-Success "Python $major.$minor 检测通过"
+  Write-Success "Python $major.$minor OK"
 } catch {
-  Fail "Python 版本检查" $_
+  Fail "Python version check" $_
 }
 
 # ── Step 2: Directories ───────────────────────────────────────────────────────
 Write-Host ""
-Write-Info "创建工作目录..."
+Write-Info "Creating directories..."
 New-Item -ItemType Directory -Force -Path inputs, outputs, logs, data | Out-Null
-Write-Success "目录创建完成"
+Write-Success "Directories ready"
 
 # ── Step 3: Virtualenv ────────────────────────────────────────────────────────
 Write-Host ""
-Write-Info "检查虚拟环境..."
+Write-Info "Checking virtual environment..."
 
 if (Test-Path ".venv") {
   if (Test-PythonExe ".\.venv\Scripts\python.exe") {
-    Write-Success "虚拟环境已存在，跳过创建"
+    Write-Success "Virtual environment already exists, skipping"
   } else {
-    Write-Warn "检测到损坏的虚拟环境，正在删除并重新创建..."
+    Write-Warn "Broken virtual environment detected, recreating..."
     Remove-Item -Recurse -Force ".venv" -ErrorAction SilentlyContinue
   }
 }
 
 if (!(Test-Path ".venv")) {
-  Write-Info "创建虚拟环境..."
+  Write-Info "Creating virtual environment..."
   try {
     & $pythonCmd -m venv .venv
     if (!(Test-PythonExe ".\.venv\Scripts\python.exe")) {
-      throw "虚拟环境创建后 python.exe 无法运行"
+      throw "python.exe not runnable after venv creation"
     }
-    Write-Success "虚拟环境创建完成"
+    Write-Success "Virtual environment created"
   } catch {
-    Fail "创建 venv" $_
+    Fail "Create venv" $_
   }
 }
 
 # Upgrade pip first
 Write-Host ""
-Write-Info "升级 pip..."
+Write-Info "Upgrading pip..."
 try {
   & ".\.venv\Scripts\python.exe" -m pip install --upgrade pip --quiet --no-warn-script-location
-  Write-Success "pip 升级完成"
+  Write-Success "pip upgraded"
 } catch {
-  Write-Warn "pip 升级失败，继续安装依赖..."
+  Write-Warn "pip upgrade failed, continuing with dependency install..."
 }
 
 # ── Step 4: Dependencies ──────────────────────────────────────────────────────
 Write-Host ""
-Write-Info "安装依赖（首次约需 2-5 分钟，请稍候）..."
-
-$pipCmd = ".\.venv\Scripts\pip.exe"
-if (!(Test-Path $pipCmd)) {
-  $pipCmd = ".\.venv\Scripts\pip3.exe"
-}
+Write-Info "Installing dependencies (first time may take 2-5 minutes)..."
 
 try {
-  # Install with progress indication
-  & ".\.venv\Scripts\python.exe" -m pip install -r requirements.txt --quiet --no-warn-script-location
-  Write-Success "依赖安装完成"
+  & ".\.venv\Scripts\python.exe" -m pip install -r requirements.txt --quiet --no-warn-script-location --prefer-binary
+  Write-Success "Dependencies installed"
 } catch {
-  Fail "依赖安装失败" $_
+  Fail "Dependency install failed" $_
+}
+
+# Desktop packages (pywebview etc.) require pythonnet on Windows which may fail
+# to build on newer Python versions. Install separately and warn on failure.
+Write-Host ""
+Write-Info "Installing desktop extensions (optional, failure does not affect Web UI)..."
+if (Test-Path "requirements-desktop.txt") {
+  $desktopResult = & ".\.venv\Scripts\python.exe" -m pip install -r requirements-desktop.txt --quiet --no-warn-script-location --prefer-binary 2>&1
+  if ($LASTEXITCODE -ne 0) {
+    Write-Warn "Desktop extension install failed (Web UI still works normally)"
+    Write-Host "  Reason: pywebview failed to compile on your Python version." -ForegroundColor DarkGray
+    Write-Host "  Web UI is fully functional; desktop window mode is unavailable." -ForegroundColor DarkGray
+  } else {
+    Write-Success "Desktop extensions installed"
+  }
 }
 
 # ── Step 5: .env ──────────────────────────────────────────────────────────────
 Write-Host ""
-Write-Info "配置文件..."
+Write-Info "Configuration file..."
 
 if (!(Test-Path ".env")) {
   Copy-Item ".env.example" ".env"
-  Write-Success "已创建 .env 配置文件"
+  Write-Success ".env created"
   Write-Host ""
-  Write-Host "  💡 提示：你可以先启动 Web UI，在「首次设置向导」里完成模型与 API key 配置。"
-  Write-Host "          无需手动编辑 .env 文件。"
+  Write-Host "  Tip: Start the Web UI and complete model & API key setup in the setup wizard."
+  Write-Host "       No need to edit .env manually."
 } else {
-  Write-Success "配置文件已存在"
+  Write-Success "Configuration file already exists"
 }
 
 # Trial packages include a temporary DeepSeek key. Keep .env in sync so older
@@ -297,54 +303,54 @@ try {
       $envText = $envText.TrimEnd() + "`r`nDEEPSEEK_API_KEY=$trialKey`r`n"
     }
     [System.IO.File]::WriteAllText((Join-Path $ProjectDir ".env"), $envText, [System.Text.Encoding]::UTF8)
-    Write-Success "已写入试用 DeepSeek Key"
+    Write-Success "Trial DeepSeek key written"
   }
 } catch {
-  Write-Warn "试用 Key 写入未完成，可继续启动；如模型认证失败请检查 .env。"
+  Write-Warn "Trial key write incomplete — continue startup; check .env if model auth fails."
 }
 
 # ── Step 6: Doctor check (non-fatal) ─────────────────────────────────────────
 Write-Host ""
-Write-Info "运行环境检查..."
+Write-Info "Running environment check..."
 try {
   $doctorOutput = & ".\.venv\Scripts\python.exe" agent.py doctor 2>&1
   $doctorOutput = $doctorOutput -join "`n"
-  if ($doctorOutput -match "missing API key|未配置|not found") {
-    Write-Warn "API key 未配置（这是正常的，首次使用需要配置）"
-    Write-Host "  你可以在 Web UI 的「首次设置向导」里配置。"
+  if ($doctorOutput -match "missing API key|not found") {
+    Write-Warn "API key not configured (normal for first run)"
+    Write-Host "  Complete setup in the Web UI setup wizard."
   } else {
-    Write-Success "环境检查通过"
+    Write-Success "Environment check passed"
   }
 } catch {
-  Write-Warn "环境检查未完成，但不影响安装。"
+  Write-Warn "Environment check incomplete, but installation is fine."
 }
 
 # ── Step 7: Desktop launcher ──────────────────────────────────────────────────
 Write-Host ""
-Write-Info "创建桌面启动入口..."
+Write-Info "Creating desktop launcher..."
 $Desktop = [System.Environment]::GetFolderPath("Desktop")
-$LauncherPath = Join-Path $Desktop "启动 Auctus Agent.bat"
+$LauncherPath = Join-Path $Desktop "Launch Auctus Agent.bat"
 
 if (Test-Path $Desktop) {
   $LauncherContent = "@echo off`r`ntitle Auctus Agent`r`nset POWERSHELL=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe`r`nif not exist `"%POWERSHELL%`" set POWERSHELL=powershell`r`ncd /d `"$ProjectDir`"`r`nif not exist `"$ProjectDir\.venv\Scripts\python.exe`" (`r`n  echo Dependencies are missing. Running installer first...`r`n  `"%POWERSHELL%`" -NoProfile -ExecutionPolicy Bypass -File scripts\install_windows.ps1`r`n  if errorlevel 1 pause & exit /b 1`r`n)`r`nstart /min `"Auctus Agent Server`" `"%POWERSHELL%`" -NoProfile -WindowStyle Minimized -ExecutionPolicy Bypass -File scripts\start_windows.ps1`r`nfor /l %%i in (1,1,30) do (`r`n  `"%POWERSHELL%`" -NoProfile -Command `"try { Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8000/healthz -TimeoutSec 1 ^| Out-Null; exit 0 } catch { exit 1 }`" >nul 2>nul`r`n  if not errorlevel 1 goto open_ui`r`n  timeout /t 1 /nobreak >nul`r`n)`r`necho Auctus Agent did not start. Check the `"Auctus Agent Server`" window for errors.`r`npause`r`nexit /b 1`r`n:open_ui`r`nstart `"`" `"http://127.0.0.1:8000`"`r`n"
   [System.IO.File]::WriteAllText($LauncherPath, $LauncherContent, [System.Text.Encoding]::ASCII)
-  Write-Success "已刷新桌面启动入口：「启动 Auctus Agent.bat」"
+  Write-Success "Desktop launcher created: 'Launch Auctus Agent.bat'"
 } else {
-  Write-Warn "无法访问桌面，跳过创建桌面入口"
+  Write-Warn "Cannot access Desktop, skipping launcher creation"
 }
 
 # ── Done ──────────────────────────────────────────────────────────────────────
 Write-Host ""
 Write-Host "═══════════════════════════════════════════════════════" -ForegroundColor Green
-Write-Success "Auctus Agent 安装完成！"
+Write-Success "Auctus Agent installation complete!"
 Write-Host "═══════════════════════════════════════════════════════" -ForegroundColor Green
 Write-Host ""
-Write-Host "  📌 接下来："
-Write-Host "  1. 双击桌面上的「启动 Auctus Agent.bat」"
-Write-Host "  2. 浏览器会自动打开 http://127.0.0.1:8000"
-Write-Host "  3. 按照首次设置向导完成配置"
+Write-Host "  Next steps:"
+Write-Host "  1. Double-click 'Launch Auctus Agent.bat' on your Desktop"
+Write-Host "  2. Your browser will open http://127.0.0.1:8000 automatically"
+Write-Host "  3. Follow the setup wizard to complete configuration"
 Write-Host ""
-Write-Host "  💡 提示："
-Write-Host "  - 首次配置需要选择模型并填写 API key"
-Write-Host "  - Telegram 配置是可选的，用于手机远程控制"
+Write-Host "  Tips:"
+Write-Host "  - First-time setup requires selecting a model and entering an API key"
+Write-Host "  - Telegram integration is optional (for remote control from your phone)"
 Write-Host ""

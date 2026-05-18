@@ -505,6 +505,18 @@
     .status{font-size:12px; margin-top:6px; color: rgba(234,240,255,.72)}
     .status.good{color: rgba(60,242,139,.95)}
     .status.bad{color: rgba(255,77,109,.95)}
+    .integration-panel{display:none;margin-top:12px}
+    .integration-panel.active{display:block}
+    .integration-card{
+      border:1px solid rgba(255,255,255,.10);
+      border-radius:12px;
+      background:rgba(255,255,255,.04);
+      padding:10px;
+    }
+    .integration-status{
+      margin-bottom:8px;
+      min-height:18px;
+    }
 
     /* ====== Wizard overlay (install/onboarding UI) ====== */
     .overlay{
@@ -842,34 +854,91 @@
     </div>
 
     <div class="section">
-      <h3>Telegram 配置</h3>
-      <div id="tgStatus" style="margin-bottom:8px"></div>
-      <details id="tgConfigForm">
-        <summary style="cursor:pointer;font-size:13px;color:#555;padding:4px 0">配置 Telegram Bot ▸</summary>
-        <div style="display:grid;gap:10px;margin-top:10px">
-          <div class="muted" style="line-height:1.6;font-size:12px">
-            <b>步骤：</b><br>
-            1. 在 Telegram 搜索 <b>@BotFather</b>，发送 <code>/newbot</code> 创建 Bot<br>
-            2. 复制 BotFather 给你的 Token（格式：<code>123456:ABC-…</code>）<br>
-            3. 给你的 Bot 发一条任意消息，然后点"获取我的 ID"<br>
-            4. 点"保存并测试"，手机会收到确认消息
-          </div>
-          <div style="display:flex;gap:6px">
-            <input id="tgToken" type="password" placeholder="Bot Token（粘贴后可验证）" style="flex:1" />
-            <button id="tgVerifyBtn" type="button" class="ghost" style="white-space:nowrap">验证 Token</button>
-          </div>
-          <div id="tgBotInfo" class="muted" style="font-size:12px;display:none"></div>
-          <div style="display:flex;gap:6px">
-            <input id="tgUserIds" placeholder="允许的用户 ID（多个用逗号隔开）" style="flex:1" />
-            <button id="tgFetchIdBtn" type="button" class="ghost" style="white-space:nowrap">获取我的 ID</button>
-          </div>
-          <div id="tgFetchResult" class="muted" style="font-size:12px;display:none"></div>
-          <div style="display:flex;gap:6px">
-            <button id="tgSaveBtn" class="primary" type="button">保存并发送测试消息</button>
-          </div>
-          <div id="tgConfigStatus" class="status"></div>
+      <h3>通信连接</h3>
+      <div class="muted" style="margin-bottom:10px">选择一个通信渠道进行配置。后续新增渠道只需要加入新的选项和配置面板。</div>
+      <div class="row">
+        <select id="commProvider" aria-label="选择通信渠道">
+          <option value="telegram">Telegram</option>
+          <option value="feishu">飞书</option>
+          <option value="lark">Lark</option>
+        </select>
+      </div>
+
+      <div id="commPanelTelegram" class="integration-panel active" data-provider-panel="telegram">
+        <div class="integration-card">
+          <div id="tgStatus" class="integration-status"></div>
+          <details id="tgConfigForm">
+            <summary style="cursor:pointer;font-size:13px;color:rgba(234,240,255,.74);padding:4px 0">配置 Telegram Bot</summary>
+            <div style="display:grid;gap:10px;margin-top:10px">
+              <div class="muted" style="line-height:1.6;font-size:12px">
+                <b>步骤：</b><br>
+                1. 在 Telegram 搜索 <b>@BotFather</b>，发送 <code>/newbot</code> 创建 Bot<br>
+                2. 复制 BotFather 给你的 Token（格式：<code>123456:ABC-…</code>）<br>
+                3. 给你的 Bot 发一条任意消息，然后点"获取我的 ID"<br>
+                4. 点"保存并测试"，手机会收到确认消息
+              </div>
+              <div style="display:flex;gap:6px">
+                <input id="tgToken" type="password" placeholder="Bot Token（粘贴后可验证）" style="flex:1" />
+                <button id="tgVerifyBtn" type="button" class="ghost" style="white-space:nowrap">验证 Token</button>
+              </div>
+              <div id="tgBotInfo" class="muted" style="font-size:12px;display:none"></div>
+              <div style="display:flex;gap:6px">
+                <input id="tgUserIds" placeholder="允许的用户 ID（多个用逗号隔开）" style="flex:1" />
+                <button id="tgFetchIdBtn" type="button" class="ghost" style="white-space:nowrap">获取我的 ID</button>
+              </div>
+              <div id="tgFetchResult" class="muted" style="font-size:12px;display:none"></div>
+              <div style="display:flex;gap:6px">
+                <button id="tgSaveBtn" class="primary" type="button">保存并发送测试消息</button>
+              </div>
+              <div id="tgConfigStatus" class="status"></div>
+            </div>
+          </details>
         </div>
-      </details>
+      </div>
+
+      <div id="commPanelFeishu" class="integration-panel" data-provider-panel="feishu">
+        <div class="integration-card">
+          <div id="feishuConfiguredInfo" class="integration-status muted"></div>
+          <div style="display:grid;gap:10px">
+            <div class="muted" style="line-height:1.6">
+              <b>WebSocket 长连接模式：</b>Auctus 会主动连接飞书开放平台，不需要公网地址。<br>
+              1. 在飞书开放平台创建企业自建应用并启用机器人<br>
+              2. 在「事件订阅」选择「使用长连接接收事件」<br>
+              3. 订阅 <code>im.message.receive_v1</code>，并开通接收/发送消息权限<br>
+              4. 发布或安装应用后，把 App ID 和 App Secret 填到这里
+            </div>
+            <input id="feishuAppId" placeholder="飞书开放平台 App ID（cli_xxxxxxxxxxxxxxxx）" />
+            <input id="feishuAppSecret" type="password" placeholder="飞书开放平台 App Secret" />
+            <input id="feishuVerifyToken" placeholder="Verification Token（仅 Webhook 模式需要，可留空）" />
+            <div class="muted">当前接收模式：<b>WebSocket 长连接</b>。Webhook 地址仅作为高级备用：<code id="feishuWebhookUrl">http://127.0.0.1:8000/webhook/feishu</code></div>
+            <div class="row" style="justify-content:flex-end">
+              <button id="feishuSaveBtn" class="primary" type="button">保存并启动长连接</button>
+            </div>
+            <div id="feishuSaveStatus" class="status"></div>
+          </div>
+        </div>
+      </div>
+
+      <div id="commPanelLark" class="integration-panel" data-provider-panel="lark">
+        <div class="integration-card">
+          <div id="larkConfiguredInfo" class="integration-status muted"></div>
+          <div style="display:grid;gap:10px">
+            <div class="muted" style="line-height:1.6">
+              <b>WebSocket 长连接模式：</b>Auctus 会主动连接 Lark Open Platform，不需要公网地址。<br>
+              1. 在 Lark Developer Console 创建应用并启用 Bot<br>
+              2. 在 Event Subscriptions 选择 Long Connection / WebSocket<br>
+              3. 订阅 <code>im.message.receive_v1</code>，并开通接收/发送消息权限<br>
+              4. 发布或安装应用后，把 App ID 和 App Secret 填到这里
+            </div>
+            <input id="larkAppId" placeholder="Lark App ID（cli_xxxxxxxxxxxxxxxx）" />
+            <input id="larkAppSecret" type="password" placeholder="Lark App Secret" />
+            <div class="row" style="justify-content:flex-end">
+              <button id="larkSaveBtn" class="primary" type="button">保存并启动长连接</button>
+            </div>
+            <div id="larkSaveStatus" class="status"></div>
+          </div>
+        </div>
+      </div>
     </div>
 
     <div class="section">
@@ -2647,6 +2716,27 @@
     };
     loadEmailAccounts().catch(()=>{});
 
+    // ── Communication integrations ───────────────────────────────────────────
+    const COMM_PROVIDERS = [
+      {id: 'telegram', panel: 'commPanelTelegram'},
+      {id: 'feishu', panel: 'commPanelFeishu'},
+      {id: 'lark', panel: 'commPanelLark'},
+    ];
+
+    function showCommunicationProvider(provider) {
+      const selected = COMM_PROVIDERS.some(p => p.id === provider) ? provider : 'telegram';
+      COMM_PROVIDERS.forEach(p => {
+        const panel = document.getElementById(p.panel);
+        if (panel) panel.classList.toggle('active', p.id === selected);
+      });
+    }
+
+    const commProvider = document.getElementById('commProvider');
+    if (commProvider) {
+      commProvider.onchange = () => showCommunicationProvider(commProvider.value);
+      showCommunicationProvider(commProvider.value);
+    }
+
     // ── Telegram config ──────────────────────────────────────────────────────
     async function loadTelegramConfig() {
       try {
@@ -2720,6 +2810,85 @@
         }
       } catch(e) { setStatus('tgConfigStatus', '保存失败：' + (e?.message || String(e)), 'bad'); }
     };
+
+    // ── Feishu config ────────────────────────────────────────────────────────
+    async function loadFeishuConfig() {
+      try {
+        const r = await fetch('/api/feishu/config');
+        if (!r.ok) return;
+        const j = await r.json();
+        const info = document.getElementById('feishuConfiguredInfo');
+        if (info) {
+          if (j.configured) {
+            info.textContent = `● 已配置飞书应用：${j.app_id}`;
+            info.style.color = 'rgba(60,242,139,.95)';
+            if ((j.domain || 'feishu') === 'feishu') document.getElementById('feishuAppId').value = j.app_id || '';
+          } else {
+            info.textContent = '● 未配置飞书应用';
+            info.style.color = 'rgba(234,240,255,.68)';
+          }
+        }
+        const larkInfo = document.getElementById('larkConfiguredInfo');
+        if (larkInfo) {
+          if (j.configured && j.domain === 'lark') {
+            larkInfo.textContent = `● 已配置 Lark 应用：${j.app_id}`;
+            larkInfo.style.color = 'rgba(60,242,139,.95)';
+            document.getElementById('larkAppId').value = j.app_id || '';
+          } else {
+            larkInfo.textContent = '● 未配置 Lark 应用';
+            larkInfo.style.color = 'rgba(234,240,255,.68)';
+          }
+        }
+        const webhook = document.getElementById('feishuWebhookUrl');
+        if (webhook) webhook.textContent = j.webhook_url || 'http://127.0.0.1:8000/webhook/feishu';
+      } catch(e) {}
+    }
+    loadFeishuConfig().catch(()=>{});
+
+    const feishuSaveBtn = document.getElementById('feishuSaveBtn');
+    if (feishuSaveBtn) {
+      feishuSaveBtn.onclick = async () => {
+        const app_id = document.getElementById('feishuAppId').value.trim();
+        const app_secret = document.getElementById('feishuAppSecret').value.trim();
+        const verification_token = document.getElementById('feishuVerifyToken').value.trim();
+        if (!app_id || !app_secret) { setStatus('feishuSaveStatus', '请填写 App ID 和 App Secret。', 'bad'); return; }
+        setStatus('feishuSaveStatus', '验证中…', '');
+        try {
+          const r = await apiPost('/api/feishu/save', {app_id, app_secret, verification_token, receive_mode: 'websocket', domain: 'feishu'});
+          if (r.ok) {
+            setStatus('feishuSaveStatus', `✓ 飞书配置已保存，长连接已启动：${r.app_id}`, 'good');
+            document.getElementById('feishuAppSecret').value = '';
+            await loadFeishuConfig();
+          } else {
+            setStatus('feishuSaveStatus', '保存失败：' + (r.detail || '未知错误'), 'bad');
+          }
+        } catch(e) {
+          setStatus('feishuSaveStatus', '保存失败：' + (e?.message || String(e)), 'bad');
+        }
+      };
+    }
+
+    const larkSaveBtn = document.getElementById('larkSaveBtn');
+    if (larkSaveBtn) {
+      larkSaveBtn.onclick = async () => {
+        const app_id = document.getElementById('larkAppId').value.trim();
+        const app_secret = document.getElementById('larkAppSecret').value.trim();
+        if (!app_id || !app_secret) { setStatus('larkSaveStatus', '请填写 App ID 和 App Secret。', 'bad'); return; }
+        setStatus('larkSaveStatus', '验证中…', '');
+        try {
+          const r = await apiPost('/api/feishu/save', {app_id, app_secret, verification_token: '', receive_mode: 'websocket', domain: 'lark'});
+          if (r.ok) {
+            setStatus('larkSaveStatus', `✓ Lark 配置已保存，长连接已启动：${r.app_id}`, 'good');
+            document.getElementById('larkAppSecret').value = '';
+            await loadFeishuConfig();
+          } else {
+            setStatus('larkSaveStatus', '保存失败：' + (r.detail || '未知错误'), 'bad');
+          }
+        } catch(e) {
+          setStatus('larkSaveStatus', '保存失败：' + (e?.message || String(e)), 'bad');
+        }
+      };
+    }
 
     $('upload').onclick = async () => {
       const f = $('file').files && $('file').files[0];

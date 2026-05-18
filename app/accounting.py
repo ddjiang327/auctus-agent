@@ -130,6 +130,17 @@ def init_db(path: Optional[Path] = None) -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS telegram_inbox (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                direction TEXT NOT NULL,
+                from_user TEXT NOT NULL DEFAULT '',
+                text TEXT NOT NULL,
+                created_at REAL NOT NULL
+            )
+            """
+        )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_user_created ON usage(user_id, created_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_session ON usage(session_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_email_user_active ON email_accounts(user_id, active, updated_at)")
@@ -780,6 +791,33 @@ def delete_email_account(account_id: str, path: Optional[Path] = None) -> dict:
         )
         conn.commit()
     return {"ok": True, "id": account_id}
+
+
+def add_telegram_inbox_message(direction: str, text: str, from_user: str = "", path: Optional[Path] = None) -> int:
+    """Store an incoming or outgoing Telegram message. Returns the inserted row id."""
+    init_db(path)
+    now = time.time()
+    with sqlite3.connect(path or db_path()) as conn:
+        cur = conn.execute(
+            "INSERT INTO telegram_inbox (direction, from_user, text, created_at) VALUES (?, ?, ?, ?)",
+            (direction, from_user or "", text, now),
+        )
+        conn.commit()
+        return cur.lastrowid or 0
+
+
+def get_telegram_inbox_messages(since_id: int = 0, limit: int = 50, path: Optional[Path] = None) -> list[dict]:
+    """Return Telegram inbox messages with id > since_id, oldest first."""
+    init_db(path)
+    with sqlite3.connect(path or db_path()) as conn:
+        rows = conn.execute(
+            "SELECT id, direction, from_user, text, created_at FROM telegram_inbox WHERE id > ? ORDER BY id ASC LIMIT ?",
+            (since_id, limit),
+        ).fetchall()
+    return [
+        {"id": r[0], "direction": r[1], "from_user": r[2], "text": r[3], "created_at": r[4]}
+        for r in rows
+    ]
 
 
 init_db()

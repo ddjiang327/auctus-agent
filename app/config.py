@@ -27,6 +27,11 @@ class Settings(BaseSettings):
     deepseek_api_key: Optional[str] = None
     dashscope_api_key: Optional[str] = None
 
+    # Mobile relay (cloud bridge to mobile app)
+    mobile_relay_url: Optional[str] = None          # e.g. ws://120.24.223.0
+    mobile_relay_admin_secret: Optional[str] = None # server admin secret, baked into app
+    mobile_relay_device_token: Optional[str] = None # this desktop's unique token (shown as QR)
+
     # Telegram
     telegram_bot_token: Optional[str] = None
     telegram_allowed_user_ids: str = ""  # 逗号分隔

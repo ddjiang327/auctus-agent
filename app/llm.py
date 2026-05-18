@@ -50,6 +50,29 @@ def chat_completion(
     return data
 
 
+def vision_completion(
+    *,
+    image_data_url: str,
+    question: str,
+    temperature: float = 0.2,
+) -> str:
+    """Analyze an image with the currently configured vision-capable model."""
+    messages: list[dict[str, Any]] = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": question or "Describe this image and extract any visible text.",
+                },
+                {"type": "image_url", "image_url": {"url": image_data_url}},
+            ],
+        }
+    ]
+    data = chat_completion(messages=messages, temperature=temperature)
+    return data["choices"][0]["message"].get("content") or ""
+
+
 def _proxy_chat_completion(
     messages: list[dict[str, Any]],
     tools: Optional[list[dict[str, Any]]] = None,
