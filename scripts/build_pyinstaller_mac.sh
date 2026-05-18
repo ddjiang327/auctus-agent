@@ -48,7 +48,10 @@ mkdir -p data inputs outputs logs
 [ -f .env ] || cp .env.example .env
 
 # AuctusAgent starts the server and opens a native window via PyWebView.
-exec ./AuctusAgent
+# Launch it in the background so Terminal can close after a Finder double-click.
+nohup ./AuctusAgent >> logs/launcher.log 2>&1 &
+osascript -e 'tell application "Terminal" to close front window' >/dev/null 2>&1 &
+exit 0
 LAUNCH
 chmod +x "$LAUNCHER"
 
