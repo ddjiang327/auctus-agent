@@ -2144,6 +2144,24 @@ def shutdown():
     return {"ok": True}
 
 
+@app.get("/api/runtime-info")
+def runtime_info() -> dict:
+    import os
+    app_dir = Path.cwd().resolve()
+    return {
+        "pid": os.getpid(),
+        "app_dir": str(app_dir),
+        "data_dir": str(settings.data_dir.resolve()),
+        "logs_dir": str(settings.logs_dir.resolve()),
+        "version": APP_VERSION,
+    }
+
+
+@app.get("/api/runtime-dir")
+def runtime_dir() -> Response:
+    return Response(str(Path.cwd().resolve()), media_type="text/plain")
+
+
 @app.get("/", response_class=HTMLResponse)
 def index():
     return HTMLResponse(

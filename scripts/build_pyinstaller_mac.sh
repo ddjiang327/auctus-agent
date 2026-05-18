@@ -54,10 +54,25 @@ echo "Starting Auctus Agent..."
 echo "Logs: $DIR/_app/logs/launcher.log"
 
 if curl -fsS http://127.0.0.1:8000/healthz >/dev/null 2>&1; then
-  echo "Auctus Agent is already running."
-  open http://127.0.0.1:8000/ >/dev/null 2>&1 || true
-  echo "You can close this Terminal window. Auctus Agent will keep running."
-  exit 0
+  CURRENT_DIR="$(pwd -P)"
+  RUNNING_DIR="$(curl -fsS http://127.0.0.1:8000/api/runtime-dir 2>/dev/null || true)"
+  if [ -n "$RUNNING_DIR" ] && [ "$RUNNING_DIR" = "$CURRENT_DIR" ]; then
+    echo "Auctus Agent is already running from this folder."
+    open http://127.0.0.1:8000/ >/dev/null 2>&1 || true
+    echo "You can close this Terminal window. Auctus Agent will keep running."
+    exit 0
+  fi
+  echo "Auctus Agent is already running from another folder."
+  if [ -n "$RUNNING_DIR" ]; then
+    echo "Running folder:  $RUNNING_DIR"
+  else
+    echo "Running folder:  unknown (older build)"
+  fi
+  echo "This launcher:   $CURRENT_DIR"
+  echo ""
+  echo "Open the existing Auctus Agent window and click 'Quit Auctus Agent', then run this launcher again."
+  echo "If you cannot find the window, stop AuctusAgent in Activity Monitor or restart your Mac."
+  exit 1
 fi
 
 nohup ./AuctusAgent >> logs/launcher.log 2>&1 &

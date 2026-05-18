@@ -667,7 +667,7 @@
         </div>
         <button id="stopBtn" class="danger" type="button" title="紧急停止（取消当前请求）">停止</button>
         <button id="openSettings" type="button" title="设置">⚙ 设置</button>
-        <button id="shutdownBtn" type="button" title="关闭 Auctus Agent 服务">关闭</button>
+        <button id="shutdownBtn" type="button" title="退出 Auctus Agent 后台服务">退出 Auctus Agent</button>
       </div>
     </header>
 
@@ -1214,6 +1214,7 @@
         stop: '停止',
         settings: '⚙ 设置',
         close: '关闭',
+        quitAgent: '退出 Auctus Agent',
         idle: '待命',
         thinking: '处理中…',
         readyCore: 'READY',
@@ -1340,6 +1341,7 @@
         stop: 'Stop',
         settings: '⚙ Settings',
         close: 'Close',
+        quitAgent: 'Quit Auctus Agent',
         idle: 'Ready',
         thinking: 'Working…',
         readyCore: 'READY',
@@ -1497,6 +1499,7 @@
       $('setupLanguage').value = state.language;
       setText('#stopBtn', tr('stop'));
       setText('#openSettings', tr('settings'));
+      setText('#shutdownBtn', tr('quitAgent'));
       setText('#closeSettings', tr('close'));
       setText('#statusText', tr('idle'));
       setText('#newlineBtn span:first-child', tr('newline'));
@@ -2499,7 +2502,7 @@
     $('shutdownBtn').onclick = async () => {
       if (!confirm('确定要关闭 Auctus Agent 吗？\n关闭后需要重新运行 Start 脚本才能使用。')) return;
       $('shutdownBtn').disabled = true;
-      $('shutdownBtn').textContent = '关闭中…';
+      $('shutdownBtn').textContent = state.language === 'zh' ? '退出中…' : 'Quitting…';
       try { await fetch('/api/shutdown', { method: 'POST' }); } catch {}
       document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;color:#aaa;font-size:18px;">Auctus Agent 已关闭。重新启动请双击 Start 文件。</div>';
     };
