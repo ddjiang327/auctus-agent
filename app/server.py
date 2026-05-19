@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 import litellm
 from pydantic import BaseModel
 
-from . import accounting, agent, memory, relay, tools
+from . import accounting, agent, memory, relay, session_control, tools
 from .config import settings
 from .version import API_COMPAT_VERSION, APP_NAME, APP_VERSION, RELEASE_CHANNEL
 
@@ -63,15 +63,21 @@ def _relay_chat_handler(session_id: str, content: str) -> str:
 async def _lifespan(app):
     from . import telegram_bot as _tg_bot
     from . import feishu_bot as _feishu_bot
+    from . import discord_bot as _dc_bot
+    from . import cronjobs as _cronjobs
     from .relay_client import start_relay_client, stop_relay_client
     _ensure_runtime_dirs()
     accounting.init_db()
     accounting.restore_route_from_db()
+    accounting.restore_model_from_db()
     _tg_bot.run_in_thread()
     _feishu_bot.run_in_thread()
+    _dc_bot.run_in_thread()
     _ensure_device_token()
     start_relay_client(_relay_chat_handler)
+    _cronjobs.start_scheduler()
     yield
+    _cronjobs.stop_scheduler()
     stop_relay_client()
 
 app = FastAPI(title="Auctus Agent", lifespan=_lifespan)
@@ -2436,7 +2442,19 @@ def chat(body: ChatIn) -> ChatOut:
                 "- 在设置里把“文件权限范围”改为“整台电脑”，再重试。"
             ),
         )
+    # If a previous task for this session is still running, signal it to stop.
+    # The agent loop picks this up at the next iteration boundary (usually within
+    # seconds). We then wait for the lock to be released before starting fresh.
+    session_control.request_stop(sid)
+    lock = session_control.get_lock(sid)
+    acquired = lock.acquire(timeout=60)
+    if not acquired:
+        raise HTTPException(
+            503,
+            "上一条任务仍在执行中，60 秒内未能停止。请稍后重试，或重启 Auctus Agent。",
+        )
     try:
+        session_control.reset_stop(sid)
         message = body.message
         file_scope_override = None
         if file_permission in {"once", "always"}:
@@ -2480,10 +2498,24 @@ def chat(body: ChatIn) -> ChatOut:
                     result = agent.chat(sid, message)
             else:
                 result = agent.chat(sid, message)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(503, _friendly_runtime_error(str(e)))
+    finally:
+        lock.release()
     files = [_file_url(p) for p in result.get("files", [])]
     return ChatOut(session_id=sid, reply=result["reply"], files=files)
+
+
+@app.post("/api/chat/stop")
+def chat_stop(body: dict) -> dict:
+    """Signal the in-flight agent loop for a session to bail out at its next iteration."""
+    sid = (body.get("session_id") or "").strip() if isinstance(body, dict) else ""
+    if not sid:
+        raise HTTPException(400, "session_id required")
+    session_control.request_stop(sid)
+    return {"ok": True, "session_id": sid}
 
 
 @app.post("/api/upload")
@@ -2553,6 +2585,7 @@ def set_model(body: ModelIn) -> dict:
     if not model:
         raise HTTPException(400, "empty model")
     settings.model = model
+    accounting.set_setup_state({"model": model})
     return {"model": settings.model, "available": _available_models()}
 
 
@@ -3388,17 +3421,40 @@ def _safe_input_filename(filename: str) -> str:
 
 
 def _available_models() -> list[str]:
+    route = accounting.current_route()
+    if route == "proxy":
+        # Models supported by the Auctus relay server, cheapest first.
+        relay_models = [
+            "deepseek-chat",
+            "deepseek-coder",
+            "gpt-5.4-nano",
+            "gpt-4o-mini",
+            "gpt-5.4-mini",
+            "gpt-4o",
+            "gpt-5.4",
+            "gpt-5.5",
+            "o3-mini",
+            "o3",
+            "claude-haiku",
+            "claude-sonnet",
+        ]
+        # Put the current model first if it's not already in the list.
+        out = [settings.model] if settings.model not in relay_models else []
+        return out + relay_models
+    # local / byo: full provider-prefixed list
     models = [
         settings.model,
         "claude-sonnet-4-5",
+        "claude-haiku-4-5",
+        "gpt-4o",
         "gpt-4o-mini",
         "deepseek/deepseek-chat",
         "ollama/llama3.1",
     ]
-    out: list[str] = []
-    for model in models:
-        if model and model not in out:
-            out.append(model)
+    out = []
+    for m in models:
+        if m and m not in out:
+            out.append(m)
     return out
 
 
