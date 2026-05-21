@@ -47,6 +47,46 @@ class ToolSafetyTests(unittest.TestCase):
         self.assertIn("error", result)
         self.assertIn("outside authorized workspace", result["error"])
 
+    def test_tool_router_limits_plain_chat_tools(self):
+        names = {schema["function"]["name"] for schema in tools.tool_schemas_for("你好，帮我写一段总结")}
+
+        self.assertIn("read_file", names)
+        self.assertIn("make_markdown_report", names)
+        self.assertNotIn("search_web", names)
+        self.assertNotIn("run_terminal_command", names)
+
+    def test_tool_router_adds_research_tools_from_task_plan(self):
+        names = {
+            schema["function"]["name"]
+            for schema in tools.tool_schemas_for(
+                "帮我买游戏本",
+                extra_system_context="结构化计划：\n- task_type: research_comparison",
+            )
+        }
+
+        self.assertIn("search_web", names)
+        self.assertIn("fetch_webpage", names)
+        self.assertIn("browser_open", names)
+
+    def test_tool_router_adds_subagent_for_parallel_comparison(self):
+        names = {schema["function"]["name"] for schema in tools.tool_schemas_for("分别比较三家保险公司的报价和风险")}
+
+        self.assertIn("run_parallel_subagents", names)
+
+        sub_names = {schema["function"]["name"] for schema in tools.tool_schemas_for("比较三家保险", extra_system_context="[SUBAGENT]")}
+        self.assertNotIn("run_parallel_subagents", sub_names)
+
+    def test_run_parallel_subagents_dispatches_to_module(self):
+        with patch("app.subagent.run_parallel_subagents", return_value={"ok": True, "count": 1}) as runner:
+            result = tools.run_tool(
+                "run_parallel_subagents",
+                {"tasks": ["查 A"], "expected_output": "来源", "timeout_seconds": 20},
+                user_input="分别比较三家保险公司的报价和风险",
+            )
+
+        self.assertEqual(result["count"], 1)
+        runner.assert_called_once_with(tasks=["查 A"], expected_output="来源", timeout_seconds=20)
+
     def test_read_file_allows_chat_authorized_file_outside_workspace(self):
         outside = self.root / "Desktop" / "Screen Shot 2026-05-13 at 23.48.08 PM.md"
         outside.parent.mkdir()
@@ -102,6 +142,68 @@ class ToolSafetyTests(unittest.TestCase):
         log_line = (settings.logs_dir / "tool_calls.jsonl").read_text(encoding="utf-8").strip()
         entry = json.loads(log_line)
         self.assertEqual(entry["status"], "error")
+
+    def test_fetch_webpage_uses_fast_timeout(self):
+        class FakeResponse:
+            headers = {"content-type": "text/plain; charset=utf-8"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _limit):
+                return b"hello"
+
+        with patch("app.tools.urlopen", return_value=FakeResponse()) as open_mock:
+            result = tools.fetch_webpage("https://example.com")
+
+        self.assertEqual(result["content"], "hello")
+        self.assertEqual(open_mock.call_args.kwargs["timeout"], 8)
+
+    def test_browser_open_uses_fast_domcontentloaded_default(self):
+        from app import tools_browser
+
+        class FakePage:
+            url = "https://example.com"
+
+            def goto(self, url, wait_until, timeout):
+                self.goto_args = {"url": url, "wait_until": wait_until, "timeout": timeout}
+
+            def title(self):
+                return "Example"
+
+        page = FakePage()
+        old_state = dict(tools_browser._STATE)
+        try:
+            tools_browser._STATE.update({"ready": True, "page": page})
+            result = tools_browser.browser_open("https://example.com")
+        finally:
+            tools_browser._STATE.clear()
+            tools_browser._STATE.update(old_state)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(page.goto_args["wait_until"], "domcontentloaded")
+        self.assertEqual(page.goto_args["timeout"], 12_000)
+
+    def test_paid_search_providers_use_fast_timeout(self):
+        from app import search_providers
+
+        class FakeResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"results": [], "web": {"results": []}}
+
+        with patch("app.search_providers.httpx.post", return_value=FakeResponse()) as post_mock:
+            search_providers._tavily_search("laptop", 3, "key")
+        with patch("app.search_providers.httpx.get", return_value=FakeResponse()) as get_mock:
+            search_providers._brave_search("laptop", 3, "key")
+
+        self.assertEqual(post_mock.call_args.kwargs["timeout"], 8)
+        self.assertEqual(get_mock.call_args.kwargs["timeout"], 8)
 
     def test_run_tool_attaches_retry_hint_on_errors(self):
         with patch("app.tools.evolution.build_tool_retry_hint", return_value="[工具重试建议]\n- 先确认文件名"):
@@ -325,7 +427,7 @@ class ToolSafetyTests(unittest.TestCase):
                     b'<a class="result__snippet">A short snippet</a>'
                 )
 
-        with patch("app.tools.urlopen", return_value=FakeResponse()):
+        with patch("app.search_providers.urlopen", return_value=FakeResponse()):
             result = tools.search_web("example product")
 
         self.assertEqual(result["count"], 1)

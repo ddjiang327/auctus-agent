@@ -36,6 +36,25 @@ class Settings(BaseSettings):
     telegram_bot_token: Optional[str] = None
     telegram_allowed_user_ids: str = ""  # 逗号分隔
 
+    # Discord
+    discord_bot_token: Optional[str] = None
+    discord_allowed_user_ids: str = ""  # 逗号分隔的 Discord 用户 ID
+
+    # Web search providers (free default + optional paid upgrades)
+    search_provider: str = "auto"  # auto | duckduckgo | tavily | brave
+    tavily_api_key: Optional[str] = None
+    brave_api_key: Optional[str] = None
+
+    # Image generation (defaults to reusing openai_api_key when image_api_key is empty)
+    image_api_key: Optional[str] = None
+
+    # Browser automation
+    browser_headless: bool = True  # keep agent browsing in the background by default
+
+    # TTS (defaults to reusing openai_api_key when tts_api_key is empty)
+    tts_api_key: Optional[str] = None
+    tts_voice: str = "alloy"  # alloy | echo | fable | onyx | nova | shimmer
+
     # 路径
     data_dir: Path = Path("./data")
     output_dir: Path = Path("./outputs")

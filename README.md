@@ -162,3 +162,10 @@ auctus-agent/
 - **多模型**：通过 LiteLLM 支持 DeepSeek、OpenAI、Anthropic、Ollama 等。
 - **安全记忆**：候选学习需要确认后才会进入运行时；已应用学习项可停用或回滚。
 - **渐进披露**：Skill 文档采用 L0（核心）+ L1（详细）结构，避免提示词膨胀。
+
+## 文档
+
+- [Plan](docs/plan.md) - 当前桌面端产品边界
+- [Roadmap](docs/roadmap.md) - 当前桌面端路线
+- [Release](docs/release.md) - 发布流程
+- [Standalone build](docs/standalone-build.md) - 打包说明

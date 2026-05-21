@@ -49,7 +49,12 @@ a = Analysis(
         "app.feishu_bot",
         "app.maintenance",
         "app.relay",
+        "app.discord_bot",
+        "app.search_providers",
         "app.telegram_bot",
+        "app.tools_browser",
+        "app.tools_image",
+        "app.tools_tts",
         "app.version",
         # uvicorn internals not auto-detected by PyInstaller
         "uvicorn.logging",
@@ -94,6 +99,15 @@ a = Analysis(
         "webview.platforms.gtk",             # Linux
         # relay client
         "app.relay_client",
+        # search providers
+        "ddgs",
+        # browser automation
+        "playwright",
+        "playwright.sync_api",
+        # cron scheduler
+        "croniter",
+        # discord bot
+        "discord",
     ] + tiktoken_ext_hiddenimports + lark_oapi_hiddenimports,
     hookspath=[],
     hooksconfig={},

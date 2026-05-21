@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 import litellm
 from pydantic import BaseModel
 
-from . import accounting, agent, memory, relay, session_control, tools
+from . import accounting, agent, evidence, memory, relay, session_control, task_mode, tools
 from .config import settings
 from .version import API_COMPAT_VERSION, APP_NAME, APP_VERSION, RELEASE_CHANNEL
 
@@ -388,6 +388,12 @@ h2{font-size:14px;margin:0 0 8px;color:#555;text-transform:uppercase;letter-spac
         <select id="model"></select>
         <button id="saveModel">切换</button>
         <button id="openSetup" type="button">重新设置</button>
+      </div>
+      <div class="row" style="align-items:center;gap:8px;margin-top:4px">
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px">
+          <input type="checkbox" id="autoModelToggle" style="width:14px;height:14px">
+          自动选模型（按任务类型）
+        </label>
       </div>
       <div class="row">
         <select id="systemLanguage">
@@ -1079,6 +1085,7 @@ function applyLanguage(language) {
 function openSettingsPanel() {
   settingsPanel.classList.add('open');
   settingsBackdrop.classList.add('open');
+  loadAutoModel();
 }
 function closeSettingsPanel() {
   settingsPanel.classList.remove('open');
@@ -1331,6 +1338,14 @@ document.getElementById('saveModel').onclick = async () => {
   const model = document.getElementById('model').value;
   await fetch('/api/model', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({model})});
   loadModels();
+};
+async function loadAutoModel() {
+  const r = await fetch('/api/auto-model');
+  const j = await r.json();
+  document.getElementById('autoModelToggle').checked = j.enabled;
+}
+document.getElementById('autoModelToggle').onchange = async (e) => {
+  await fetch('/api/auto-model', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({enabled: e.target.checked})});
 };
 document.getElementById('setupModel').onchange = syncProviderToModel;
 document.getElementById('model').onchange = syncProviderToModel;
@@ -2079,6 +2094,7 @@ class ChatIn(BaseModel):
     terminal_permission: Optional[str] = None
     calendar_permission: Optional[str] = None
     file_permission: Optional[str] = None
+    task_mode: Optional[bool] = False
 
 
 class ChatOut(BaseModel):
@@ -2086,10 +2102,15 @@ class ChatOut(BaseModel):
     reply: str
     files: list[str] = []
     permission_request: Optional[dict] = None
+    task: Optional[dict] = None
 
 
 class ModelIn(BaseModel):
     model: str
+
+
+class AutoModelIn(BaseModel):
+    enabled: bool
 
 
 class RouteIn(BaseModel):
@@ -2115,6 +2136,41 @@ class HostedLoginIn(BaseModel):
     email: str
     password: str
     region: str = "auto"
+
+
+class HostedBillingIn(BaseModel):
+    base_url: str
+    token: str
+
+
+def _fetch_hosted_billing_summary(client: httpx.Client, base_url: str, auth_headers: dict, region: str = "global") -> dict:
+    billing: dict = {}
+    status_res = client.get(f"{base_url}/subscriptions/billing-status?region={region}", headers=auth_headers)
+    if status_res.is_success:
+        billing = status_res.json()
+
+    balances_res = client.get(f"{base_url}/billing/balance", headers=auth_headers)
+    if balances_res.is_success:
+        balances = balances_res.json()
+        billing["balances"] = balances
+        primary = next((b for b in balances if b.get("region") == region), None)
+        if primary is None:
+            primary = next((b for b in balances if b.get("region") == "global"), None)
+        if primary is not None:
+            billing["balance"] = {"amount": primary.get("balance", 0.0), "region": primary.get("region")}
+
+    subs_res = client.get(f"{base_url}/subscriptions/my", headers=auth_headers)
+    if subs_res.is_success:
+        subs = subs_res.json()
+        billing["subscriptions"] = subs
+        usable = [
+            s for s in subs
+            if s.get("status") in {"active", "cancelled"} and int(s.get("days_remaining") or 0) >= 0
+        ]
+        if usable:
+            billing["subscription"] = usable[0]
+
+    return billing
 
 
 class PermissionScopeIn(BaseModel):
@@ -2395,10 +2451,17 @@ def chat(body: ChatIn) -> ChatOut:
     file_permission = _normalize_file_permission(body.file_permission)
     calendar_permission = _normalize_calendar_permission(body.calendar_permission)
     terminal_permission = _normalize_terminal_permission(body.terminal_permission)
+    active_task = task_mode.create_or_resume(sid, body.message) if body.task_mode else None
+    plan_only_task_turn = bool(
+        active_task
+        and int(active_task.get("current_step") or 0) == 0
+        and len(active_task.get("activity") or []) <= 2
+    )
     if _should_request_file_permission(body.message, file_permission):
         return ChatOut(
             session_id=sid,
             reply="",
+            task=active_task,
             permission_request={
                 "type": "files",
                 "message": "这个任务需要访问你电脑上的文件（可能超出当前授权 workspace）。是否临时授权本次访问？",
@@ -2409,6 +2472,7 @@ def chat(body: ChatIn) -> ChatOut:
         return ChatOut(
             session_id=sid,
             reply="",
+            task=active_task,
             permission_request={
                 "type": "calendar",
                 "message": "这个任务需要访问系统日历/提醒事项。是否授权？（如果你不希望我直接写入日历，我也可以生成 .ics 文件供你导入）",
@@ -2419,6 +2483,7 @@ def chat(body: ChatIn) -> ChatOut:
         return ChatOut(
             session_id=sid,
             reply="",
+            task=active_task,
             permission_request={
                 "type": "terminal",
                 "message": "这个任务需要执行终端命令。是否授权？",
@@ -2429,12 +2494,14 @@ def chat(body: ChatIn) -> ChatOut:
         return ChatOut(
             session_id=sid,
             reply="好的，这次我不访问系统日历/提醒事项。如果你愿意，我可以帮你生成一个 .ics 文件，你导入到日历即可。",
+            task=active_task,
         )
     if terminal_permission == "no":
-        return ChatOut(session_id=sid, reply="好的，这次不执行终端命令。")
+        return ChatOut(session_id=sid, reply="好的，这次不执行终端命令。", task=active_task)
     if file_permission == "no":
         return ChatOut(
             session_id=sid,
+            task=active_task,
             reply=(
                 "好的，这次我不访问 workspace 之外的文件。\n"
                 "你可以：\n"
@@ -2476,6 +2543,25 @@ def chat(body: ChatIn) -> ChatOut:
                 "如果你无法直接写入系统日历，请生成可导入的 .ics 文件（周五早上“加油”提醒），并告诉用户如何导入。\n\n"
                 + message
             )
+        # Auto model routing: pick the best model based on message content (proxy mode only).
+        if accounting.get_setup_state().get("auto_model") and accounting.current_route() == "proxy":
+            settings.model = _auto_pick_model(message)
+
+        task_context = None
+        quick_without_tools = False
+        if active_task:
+            task_mode.mark_working(sid, "Agent 正在按任务清单推进")
+            task_context = task_mode.prompt_context(active_task)
+            if plan_only_task_turn:
+                task_context += (
+                    "\n[本轮执行限制]\n"
+                    "这是新任务的第一轮。不要调用工具，不要搜索网页。"
+                    "只输出任务清单、当前步骤、已知信息、最多 3 个关键问题和下一步。"
+                )
+        else:
+            task_context = _quick_answer_context()
+            quick_without_tools = _should_quick_answer_without_tools(message)
+
         if terminal_permission in {"once", "always"}:
             if terminal_permission == "always":
                 accounting.set_setup_state({"terminal_access": "enabled"})
@@ -2489,15 +2575,15 @@ def chat(body: ChatIn) -> ChatOut:
             with tools.terminal_access_override("enabled"):
                 if file_scope_override:
                     with tools.permission_scope_override(file_scope_override):
-                        result = agent.chat(sid, message)
+                        result = agent.chat(sid, message, extra_system_context=task_context, allow_tools=(not plan_only_task_turn and not quick_without_tools))
                 else:
-                    result = agent.chat(sid, message)
+                    result = agent.chat(sid, message, extra_system_context=task_context, allow_tools=(not plan_only_task_turn and not quick_without_tools))
         else:
             if file_scope_override:
                 with tools.permission_scope_override(file_scope_override):
-                    result = agent.chat(sid, message)
+                    result = agent.chat(sid, message, extra_system_context=task_context, allow_tools=(not plan_only_task_turn and not quick_without_tools))
             else:
-                result = agent.chat(sid, message)
+                result = agent.chat(sid, message, extra_system_context=task_context, allow_tools=(not plan_only_task_turn and not quick_without_tools))
     except HTTPException:
         raise
     except Exception as e:
@@ -2505,7 +2591,62 @@ def chat(body: ChatIn) -> ChatOut:
     finally:
         lock.release()
     files = [_file_url(p) for p in result.get("files", [])]
-    return ChatOut(session_id=sid, reply=result["reply"], files=files)
+    reply = result.get("reply", "")
+    if active_task:
+        active_task = task_mode.mark_after_reply(sid, reply) or active_task
+        reply = task_mode.strip_update_markers(reply)
+    return ChatOut(session_id=sid, reply=reply, files=files, task=active_task)
+
+
+@app.get("/api/task/{session_id}")
+def task_state(session_id: str) -> dict:
+    task = task_mode.get(session_id)
+    return {"task": task}
+
+
+@app.get("/api/tasks")
+def task_list(limit: int = 20) -> dict:
+    return {"items": task_mode.list_tasks(limit=limit)}
+
+
+@app.get("/api/evidence/{session_id}")
+def evidence_list(session_id: str, limit: int = 20) -> dict:
+    return {"items": evidence.list_evidence(session_id, limit=limit)}
+
+
+@app.post("/api/task/{session_id}/end")
+def task_end(session_id: str) -> dict:
+    return {"task": task_mode.end(session_id)}
+
+
+def _quick_answer_context() -> str:
+    return (
+        "[普通快速回答模式]\n"
+        "用户没有开启 Task Mode。不要使用任务清单、当前步骤、长问卷或逐步执行格式，"
+        "也不要因为历史里曾经出现任务模式就继续沿用任务模式。\n"
+        "先直接给一个有用的简短答案或初步建议；如果缺少信息，只在结尾问最多 1-2 个最关键问题。\n"
+        "涉及保险、金融、法律、医疗等高影响事项时，可以说明需要用户自行核对官方报价和条款，"
+        "但仍要先给用户一个快速方向。"
+    )
+
+
+def _should_quick_answer_without_tools(message: str) -> bool:
+    text = (message or "").lower()
+    shopping_or_quote = any(
+        signal in text
+        for signal in (
+            "buy", "purchase", "shopping", "deal", "quote", "insurance", "laptop", "notebook",
+            "买", "购买", "划算", "性价比", "报价", "保险", "笔记本", "电脑", "游戏本",
+        )
+    )
+    explicit_live_lookup = any(
+        signal in text
+        for signal in (
+            "search", "browse", "open website", "real-time", "latest price", "check stock",
+            "搜索", "上网", "打开网页", "查官网", "实时", "最新价格", "查库存", "现在价格",
+        )
+    )
+    return shopping_or_quote and not explicit_live_lookup
 
 
 @app.post("/api/chat/stop")
@@ -2589,6 +2730,18 @@ def set_model(body: ModelIn) -> dict:
     return {"model": settings.model, "available": _available_models()}
 
 
+@app.get("/api/auto-model")
+def get_auto_model() -> dict:
+    enabled = bool(accounting.get_setup_state().get("auto_model", False))
+    return {"enabled": enabled}
+
+
+@app.post("/api/auto-model")
+def set_auto_model(body: AutoModelIn) -> dict:
+    accounting.set_setup_state({"auto_model": body.enabled})
+    return {"enabled": body.enabled}
+
+
 @app.get("/api/language")
 def get_language() -> dict:
     state = accounting.get_setup_state()
@@ -2665,10 +2818,13 @@ def hosted_login(body: HostedLoginIn) -> dict:
                 raise HTTPException(502, "登录成功但后台没有返回 access token")
 
             auth_headers = {"Authorization": f"Bearer {token}"}
-            billing: dict = {}
-            billing_res = client.get(f"{base_url}/subscriptions/billing-status", headers=auth_headers)
-            if billing_res.is_success:
-                billing = billing_res.json()
+            region = _normalize_hosted_region(body.region)
+            billing = _fetch_hosted_billing_summary(
+                client,
+                base_url,
+                auth_headers,
+                "cn" if region == "cn" else "global",
+            )
 
             key_res = client.post(
                 f"{base_url}/api-keys/",
@@ -2681,7 +2837,6 @@ def hosted_login(body: HostedLoginIn) -> dict:
             if not api_key:
                 raise HTTPException(502, "API Key 创建成功但后台没有返回 key")
 
-            region = _normalize_hosted_region(body.region)
             try:
                 accounting.set_setup_state(
                     {
@@ -2710,6 +2865,28 @@ def hosted_login(body: HostedLoginIn) -> dict:
         missing = getattr(e, "filename", "") or str(e)
         print(f"[hosted-login] local file error: {missing}")
         raise HTTPException(500, f"本地文件或目录不存在，无法完成登录：{missing}") from e
+
+
+@app.post("/api/hosted-billing")
+def hosted_billing(body: HostedBillingIn) -> dict:
+    base_url = body.base_url.strip().rstrip("/")
+    if not base_url.startswith(("https://", "http://")):
+        raise HTTPException(400, "invalid hosted API URL")
+    if not body.token:
+        raise HTTPException(400, "token is required")
+    try:
+        with httpx.Client(timeout=10.0, trust_env=False) as client:
+            headers = {"Authorization": f"Bearer {body.token}"}
+            res = client.get(f"{base_url}/subscriptions/billing-status", headers=headers)
+            if res.status_code == 401:
+                raise HTTPException(401, "session expired")
+            if not res.is_success:
+                raise HTTPException(502, "billing fetch failed")
+            return _fetch_hosted_billing_summary(client, base_url, headers)
+    except HTTPException:
+        raise
+    except httpx.HTTPError as e:
+        raise HTTPException(502, f"无法连接 Auctus API：{e}") from e
 
 
 @app.get("/api/permission-scope")
@@ -3418,6 +3595,20 @@ def _safe_input_filename(filename: str) -> str:
     if not safe or safe in {".", ".."}:
         raise HTTPException(400, "invalid filename")
     return safe[:180]
+
+
+def _auto_pick_model(message: str) -> str:
+    """Pick the best relay model based on message keywords. Only used in proxy mode."""
+    msg = message.lower()
+    code_signals = ["def ", "class ", "import ", "```", "write code", "debug", "fix bug",
+                    "function", "script", "程序", "代码", "函数", "bug", "报错", "错误"]
+    reasoning_signals = ["analyze", "compare", "research", "explain why", "pros and cons",
+                         "分析", "对比", "研究", "推理", "论证", "方案", "架构"]
+    if any(s in msg for s in code_signals):
+        return "deepseek-coder"
+    if any(s in msg for s in reasoning_signals):
+        return "gpt-5.4"
+    return "deepseek-chat"
 
 
 def _available_models() -> list[str]:

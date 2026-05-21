@@ -108,6 +108,82 @@ class ServerApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["items"], [entries[-1]])
 
+    def test_task_mode_strips_hidden_update_marker_from_reply(self):
+        marker = '<!--TASK_UPDATE {"current_step":3,"status":"in_progress","activity_key":"advanced"}-->'
+        with patch("app.server.agent.chat", return_value={"reply": f"正在收集候选方案。\n{marker}", "files": []}):
+            response = self.client.post(
+                "/api/chat",
+                json={
+                    "session_id": "task-marker-session",
+                    "message": "帮我买游戏本",
+                    "task_mode": True,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertNotIn("TASK_UPDATE", body["reply"])
+        self.assertEqual(body["task"]["current_step"], 2)
+        self.assertEqual(body["task"]["steps"][2]["status"], "in_progress")
+
+    def test_tasks_endpoint_returns_task_history(self):
+        with patch("app.server.task_mode.list_tasks", return_value=[{"session_id": "task-1", "goal": "买游戏本"}]) as list_tasks:
+            response = self.client.get("/api/tasks?limit=5")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["items"][0]["session_id"], "task-1")
+        list_tasks.assert_called_once_with(limit=5)
+
+    def test_evidence_endpoint_returns_session_sources(self):
+        with patch("app.server.evidence.list_evidence", return_value=[{"title": "Source"}]) as list_evidence:
+            response = self.client.get("/api/evidence/task-1?limit=3")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["items"][0]["title"], "Source")
+        list_evidence.assert_called_once_with("task-1", limit=3)
+
+    def test_new_task_mode_turn_disables_tools_for_planning(self):
+        with patch("app.server.agent.chat", return_value={"reply": "先列清单", "files": []}) as chat:
+            response = self.client.post(
+                "/api/chat",
+                json={
+                    "session_id": "task-plan-only-session",
+                    "message": "我想买个游戏本，在墨尔本",
+                    "task_mode": True,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(chat.call_args.kwargs["allow_tools"])
+        self.assertIn("新任务的第一轮", chat.call_args.kwargs["extra_system_context"])
+
+    def test_quick_shopping_question_disables_tools_unless_live_lookup_requested(self):
+        with patch("app.server.agent.chat", return_value={"reply": "快速建议", "files": []}) as chat:
+            response = self.client.post(
+                "/api/chat",
+                json={
+                    "session_id": "quick-shopping-session",
+                    "message": "我想买个游戏本，预算2000澳币以内",
+                    "task_mode": False,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(chat.call_args.kwargs["allow_tools"])
+
+        with patch("app.server.agent.chat", return_value={"reply": "实时结果", "files": []}) as chat_live:
+            response = self.client.post(
+                "/api/chat",
+                json={
+                    "session_id": "quick-shopping-live-session",
+                    "message": "帮我搜索最新价格，游戏本预算2000澳币以内",
+                    "task_mode": False,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(chat_live.call_args.kwargs["allow_tools"])
+
     def test_model_can_be_changed_at_runtime(self):
         response = self.client.post("/api/model", json={"model": "deepseek/deepseek-chat"})
 
