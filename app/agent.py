@@ -14,7 +14,7 @@ from typing import Optional
 from urllib.parse import urlparse
 
 from .config import settings
-from . import accounting, evidence, evolution, llm, memory, playbooks, session_control, task_mode, tools
+from . import accounting, evidence, evolution, intent, llm, memory, playbooks, preferences, routing, session_control, task_mode, tools
 
 PROMPTS_DIR = Path(__file__).parent.parent / "prompts"
 
@@ -30,8 +30,14 @@ def _system_prompt() -> str:
     model_info = f"\n\n## 当前配置\n你正在使用 {settings.model} 模型。如果用户问你使用什么模型，请如实回答。"
     return base + model_info
 
-def _build_messages(session_id: str, user_text: str, extra_system_context: Optional[str] = None) -> list[dict]:
+def _build_messages(
+    session_id: str,
+    user_text: str,
+    extra_system_context: Optional[str] = None,
+    intent_decision: Optional[dict] = None,
+) -> list[dict]:
     """组装一次完整调用所需的 messages：system + 摘要 + 历史 + 当前。"""
+    intent_decision = intent_decision or intent.classify(user_text, extra_system_context=extra_system_context)
     history = memory.load_history(session_id, limit=40)
     history = memory.summarize_and_truncate(
         session_id,
@@ -46,6 +52,10 @@ def _build_messages(session_id: str, user_text: str, extra_system_context: Optio
     msgs.append({"role": "system", "content": _workspace_context()})
     msgs.append({"role": "system", "content": _language_context()})
     msgs.append({"role": "system", "content": _persona_context()})
+    preference_context = preferences.context(max_chars=800)
+    if preference_context:
+        msgs.append({"role": "system", "content": preference_context})
+    msgs.append({"role": "system", "content": intent.prompt_context(intent_decision)})
     memory_context = _memory_context(user_text)
     if memory_context:
         msgs.append({"role": "system", "content": memory_context})
@@ -56,6 +66,15 @@ def _build_messages(session_id: str, user_text: str, extra_system_context: Optio
     playbook_context = playbooks.context_for(user_text)
     if playbook_context:
         msgs.append({"role": "system", "content": playbook_context})
+    pinned = _pinned_context()
+    if pinned:
+        msgs.append({"role": "system", "content": pinned})
+    rag = _rag_context(user_text) if intent_decision.get("use_rag") else ""
+    if rag:
+        msgs.append({"role": "system", "content": rag})
+    recent = _recent_sessions_context(session_id) if intent_decision.get("use_recent_sessions") else ""
+    if recent:
+        msgs.append({"role": "system", "content": recent})
     if extra_system_context:
         msgs.append({"role": "system", "content": extra_system_context})
     msgs.extend(history)
@@ -76,6 +95,7 @@ def chat(
     task_output_dir.mkdir(parents=True, exist_ok=True)
     settings.output_dir = task_output_dir
     explicit_paths = _extract_existing_paths(user_text)
+    intent_decision = intent.classify(user_text, extra_system_context=extra_system_context, explicit_paths=explicit_paths)
 
     try:
         with tools.chat_authorized_paths(explicit_paths):
@@ -84,7 +104,12 @@ def chat(
                 session_id=session_id,
                 route=accounting.current_route(),
             ):
-                msgs = _build_messages(session_id, user_text, extra_system_context=extra_system_context)
+                msgs = _build_messages(
+                    session_id,
+                    user_text,
+                    extra_system_context=extra_system_context,
+                    intent_decision=intent_decision,
+                )
                 if explicit_paths:
                     msgs.insert(-1, {
                         "role": "system",
@@ -95,17 +120,23 @@ def chat(
                         "如果是文件夹，可以读取其目录列表及子文件。"
                         ),
                     })
+                effective_model = routing.resolve_model(intent_decision.get("model_tier") or routing.classify(user_text))
                 memory.append_message(session_id, {"role": "user", "content": user_text})
-                if not allow_tools:
-                    resp = llm.chat_completion(messages=msgs)
+                effective_allow_tools = allow_tools and bool(intent_decision.get("use_tools", True))
+                if not effective_allow_tools:
+                    resp = llm.chat_completion(messages=msgs, model=effective_model)
                     ai_msg = resp["choices"][0]["message"]
                     raw_content = ai_msg.get("content") or ""
                     clean_msg = dict(ai_msg)
                     clean_msg["content"] = task_mode.strip_update_markers(raw_content)
                     memory.append_message(session_id, clean_msg)
                     return {"reply": raw_content, "files": files_produced}
-                tool_schemas = tools.tool_schemas_for(user_text, extra_system_context=extra_system_context)
-                return _chat_with_tools(session_id, user_text, msgs, files_produced, tool_schemas)
+                tool_schemas = tools.tool_schemas_for(
+                    user_text,
+                    extra_system_context=extra_system_context,
+                    intent_decision=intent_decision,
+                )
+                return _chat_with_tools(session_id, user_text, msgs, files_produced, tool_schemas, model=effective_model)
     finally:
         settings.output_dir = base_output_dir
 
@@ -116,19 +147,18 @@ def _chat_with_tools(
     msgs: list[dict],
     files_produced: list[str],
     tool_schemas: list[dict],
+    model: str = "",
 ) -> dict:
     """Run the tool-use loop. Assumes output_dir and usage context are already set."""
     last_tool_results: list[dict] = []
     max_iterations = min(settings.max_tool_iterations, 4) if _looks_like_shopping_or_quote_task(user_text) else settings.max_tool_iterations
     for iteration in range(max_iterations):
-        # Cooperative cancellation: bail out if the UI / a newer message has
-        # requested a stop on this session.
         if session_control.is_stopped(session_id):
             stop_msg = "已停止当前任务。"
             memory.append_message(session_id, {"role": "assistant", "content": stop_msg})
             return {"reply": stop_msg, "files": files_produced, "stopped": True}
 
-        resp = llm.chat_completion(messages=msgs, tools=tool_schemas)
+        resp = llm.chat_completion(messages=msgs, tools=tool_schemas, model=model)
         ai_msg = resp["choices"][0]["message"]
         msgs.append(ai_msg)
 
@@ -562,6 +592,55 @@ def _extract_existing_paths(text: str) -> list[Path]:
             seen.add(path)
             found.append(path)
     return found
+
+
+def _pinned_context() -> str:
+    state = accounting.get_setup_state()
+    pinned = state.get("pinned_context", "").strip()
+    if not pinned:
+        return ""
+    return f"[关于用户（常驻上下文）]\n{pinned}\n"
+
+
+def _recent_sessions_context(current_session_id: str) -> str:
+    """Brief recent-activity note, injected only when starting a brand-new session."""
+    current_history = memory.load_history(current_session_id, limit=1)
+    if current_history:
+        return ""
+    sessions = memory.list_sessions(limit=6)
+    recent = [s for s in sessions if s["session_id"] != current_session_id][:3]
+    if not recent:
+        return ""
+    from datetime import datetime
+    lines = ["[最近活动（仅供参考，用户可能想继续之前的任务）]"]
+    for s in recent:
+        try:
+            ts = datetime.fromtimestamp(s["last_ts"]).strftime("%m-%d %H:%M")
+        except Exception:
+            ts = "—"
+        preview = (s.get("preview") or "").strip()[:80]
+        if preview:
+            lines.append(f"- {ts}：{preview}")
+    return "\n".join(lines) if len(lines) > 1 else ""
+
+
+def _rag_context(user_text: str) -> str:
+    try:
+        from . import rag
+        results = rag.search(user_text, k=4)
+        if not results:
+            return ""
+        parts = ["[本地知识库相关内容]（来自用户索引的文档，可作为参考依据）"]
+        for r in results:
+            fname = r.get("file", "")
+            content = (r.get("content") or "").strip()
+            if not content:
+                continue
+            header = f"来自 `{fname}`：" if fname else "文档片段："
+            parts.append(f"{header}\n{content}")
+        return "\n\n".join(parts) if len(parts) > 1 else ""
+    except Exception:
+        return ""
 
 
 def _longest_existing_path(segment: str) -> Path | None:

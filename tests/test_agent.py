@@ -138,6 +138,50 @@ class AgentOutputIsolationTests(unittest.TestCase):
         self.assertIn("[笔记本购买 playbook]", joined)
         self.assertIn("RTX 4060", joined)
 
+    def test_plain_chat_does_not_run_rag_search(self):
+        final_response = {
+            "model": "test-model",
+            "choices": [{"message": {"role": "assistant", "content": "你好"}}],
+        }
+
+        with patch("app.agent.llm.chat_completion", return_value=final_response):
+            with patch("app.rag.search", return_value=[]) as rag_search:
+                result = agent.chat("session-no-rag", "你好")
+
+        self.assertEqual(result["reply"], "你好")
+        rag_search.assert_not_called()
+
+    def test_document_request_runs_rag_search(self):
+        final_response = {
+            "model": "test-model",
+            "choices": [{"message": {"role": "assistant", "content": "done"}}],
+        }
+
+        with patch("app.agent.llm.chat_completion", return_value=final_response):
+            with patch("app.rag.search", return_value=[{"file": "a.md", "content": "context"}]) as rag_search:
+                result = agent.chat("session-with-rag", "查一下本地知识库里的项目文档")
+
+        self.assertEqual(result["reply"], "done")
+        rag_search.assert_called_once()
+
+    def test_chat_injects_lightweight_preference_summary(self):
+        final_response = {
+            "model": "test-model",
+            "choices": [{"message": {"role": "assistant", "content": "done"}}],
+        }
+        captured_messages = []
+
+        def fake_completion(*, messages, tools=None, **_kwargs):
+            captured_messages.extend(messages)
+            return final_response
+
+        with patch("app.agent.preferences.get_summary", return_value="- 默认用中文简洁回答"):
+            with patch("app.agent.llm.chat_completion", side_effect=fake_completion):
+                result = agent.chat("session-pref-summary", "帮我总结一下")
+
+        self.assertEqual(result["reply"], "done")
+        self.assertTrue(any("[用户偏好摘要]" in msg.get("content", "") for msg in captured_messages))
+
     def test_chat_keeps_task_update_marker_out_of_history(self):
         marker = '<!--TASK_UPDATE {"current_step":2,"status":"in_progress","activity_key":"advanced"}-->'
         final_response = {

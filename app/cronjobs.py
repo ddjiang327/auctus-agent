@@ -38,6 +38,9 @@ class CronJob:
     description: str = ""
     enabled: bool = True
     created_at: float = 0.0
+    # Event-trigger fields (empty string = time-based cron)
+    trigger_type: str = ""   # "" | "email_match" | "url_watch"
+    trigger_config: str = "" # JSON-encoded trigger params
 
 
 def ensure_dirs() -> None:
@@ -577,15 +580,227 @@ def _scheduler_loop() -> None:
 
 def start_scheduler() -> None:
     """Start the background scheduler. Safe to call multiple times (idempotent)."""
-    global _scheduler_thread
+    global _scheduler_thread, _event_thread
     if _scheduler_thread and _scheduler_thread.is_alive():
         return
     _stop_event.clear()
     _scheduler_thread = _threading.Thread(target=_scheduler_loop, daemon=True, name="cron-scheduler")
     _scheduler_thread.start()
+    _event_thread = _threading.Thread(target=_event_loop, daemon=True, name="event-trigger")
+    _event_thread.start()
     _log.info("In-process cron scheduler started")
 
 
 def stop_scheduler() -> None:
     """Signal the scheduler loop to exit."""
     _stop_event.set()
+
+
+# ─────────────────────────── daily brief ───────────────────────────────────
+
+_DAILY_BRIEF_JOB_NAME = "__daily_brief__"
+
+
+def _daily_brief_prompt() -> str:
+    return (
+        "请生成今日简报：1) 今天的日期和星期；"
+        "2) 本周（含今天）对话次数（从记忆/日志估算）；"
+        "3) 接下来 24 小时内有无定时任务即将触发；"
+        "4) 一句积极的开始建议。"
+        "如果 Telegram 已配置，请同时用 send_telegram_message 工具把简报发送给用户。"
+        "回复要简洁，控制在 150 字以内。"
+    )
+
+
+def get_daily_brief_config() -> dict:
+    from . import accounting
+    state = accounting.get_setup_state()
+    return {
+        "enabled": state.get("daily_brief_enabled", "0") == "1",
+        "hour": int(state.get("daily_brief_hour", "8")),
+    }
+
+
+def add_event_trigger(
+    *,
+    name: str,
+    trigger_type: str,
+    trigger_config: dict,
+    task: str,
+) -> dict:
+    """Register an event-triggered job (email_match or url_watch).
+
+    trigger_type="email_match": trigger_config must include account_id + keyword (subject/sender match).
+    trigger_type="url_watch":   trigger_config must include url; optional selector + match_text.
+    """
+    allowed = {"email_match", "url_watch"}
+    if trigger_type not in allowed:
+        return {"error": f"trigger_type must be one of {allowed}"}
+    job = CronJob(
+        id=uuid.uuid4().hex[:10],
+        name=name.strip() or trigger_type,
+        schedule="",  # not time-based
+        script_path="",
+        description=task.strip(),
+        enabled=True,
+        created_at=time.time(),
+        trigger_type=trigger_type,
+        trigger_config=json.dumps(trigger_config, ensure_ascii=False),
+    )
+    jobs = _read_jobs()
+    jobs.append(job)
+    _write_jobs(jobs)
+    return {
+        "ok": True,
+        "job": asdict(job),
+        "note": f"事件触发器 '{name}' 已创建，Auctus 会在后台监听 {trigger_type}，条件满足时自动执行任务。",
+    }
+
+
+# ─────────── event-trigger state store ───────────
+
+_TRIGGER_STATE_PATH = (CRON_DIR / "trigger_state.json").resolve()
+
+
+def _load_trigger_state() -> dict:
+    if _TRIGGER_STATE_PATH.exists():
+        try:
+            return json.loads(_TRIGGER_STATE_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+
+def _save_trigger_state(state: dict) -> None:
+    _TRIGGER_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _TRIGGER_STATE_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _check_email_match(job: CronJob, cfg: dict, state: dict) -> tuple[bool, bool]:
+    """Return (fired, state_changed) for matching email since last check."""
+    account_id = cfg.get("account_id", "")
+    keyword = (cfg.get("keyword") or cfg.get("subject") or "").lower()
+    if not account_id or not keyword:
+        return False, False
+    try:
+        from . import accounting, email_client
+        account = accounting.get_email_account(account_id)
+        if not account:
+            return False, False
+        emails = email_client.list_inbox(account, limit=10)
+    except Exception:
+        return False, False
+
+    last_uid = state.get(job.id, {}).get("last_uid", "")
+    matched_uid = ""
+    for email in emails:
+        uid = str(email.get("uid") or "")
+        subject = (email.get("subject") or "").lower()
+        sender = (email.get("from") or "").lower()
+        if keyword in subject or keyword in sender:
+            if uid != last_uid:
+                matched_uid = uid
+                break
+
+    if matched_uid:
+        if job.id not in state:
+            state[job.id] = {}
+        state[job.id]["last_uid"] = matched_uid
+        return True, True
+    return False, False
+
+
+def _check_url_watch(job: CronJob, cfg: dict, state: dict) -> tuple[bool, bool]:
+    """Return (fired, state_changed) for watched URL content changes."""
+    import hashlib
+    from urllib.request import Request, urlopen
+
+    url = cfg.get("url", "")
+    if not url:
+        return False, False
+    selector = cfg.get("selector", "")
+    match_text = (cfg.get("match_text") or "").lower()
+    try:
+        req = Request(url, headers={"User-Agent": "AuctusAgent/0.1"})
+        with urlopen(req, timeout=10) as r:
+            raw = r.read(500_000).decode("utf-8", errors="replace")
+    except Exception:
+        return False, False
+
+    if selector:
+        try:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(raw, "lxml")
+            elements = soup.select(selector)
+            raw = " ".join(el.get_text(strip=True) for el in elements)
+        except Exception:
+            pass
+
+    if match_text and match_text not in raw.lower():
+        return False, False
+
+    content_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    last_hash = state.get(job.id, {}).get("hash", "")
+    if content_hash != last_hash:
+        if job.id not in state:
+            state[job.id] = {}
+        state[job.id]["hash"] = content_hash
+        if not last_hash:
+            return False, True  # first run: record baseline, don't fire
+        return True, True
+    return False, False
+
+
+_event_thread: Optional[_threading.Thread] = None
+
+
+def _event_loop() -> None:
+    """Poll event-triggered jobs every 60 s."""
+    while not _stop_event.is_set():
+        state = _load_trigger_state()
+        changed = False
+        for job in _read_jobs():
+            if not job.enabled or not job.trigger_type:
+                continue
+            try:
+                cfg = json.loads(job.trigger_config or "{}")
+            except Exception:
+                continue
+            fired = False
+            state_changed = False
+            if job.trigger_type == "email_match":
+                fired, state_changed = _check_email_match(job, cfg, state)
+            elif job.trigger_type == "url_watch":
+                fired, state_changed = _check_url_watch(job, cfg, state)
+            if state_changed:
+                changed = True
+            if fired:
+                _log.info("Event trigger fired: %s (%s)", job.name, job.id)
+                _threading.Thread(target=_execute_job, args=(job,), daemon=True).start()
+        if changed:
+            _save_trigger_state(state)
+        _stop_event.wait(60)
+
+
+def set_daily_brief(enabled: bool, hour: int = 8) -> dict:
+    from . import accounting
+    hour = max(0, min(23, int(hour)))
+    accounting.set_setup_state({
+        "daily_brief_enabled": "1" if enabled else "0",
+        "daily_brief_hour": str(hour),
+    })
+    jobs = _read_jobs()
+    jobs = [j for j in jobs if j.name != _DAILY_BRIEF_JOB_NAME]
+    if enabled:
+        job = CronJob(
+            id="daily_brief",
+            name=_DAILY_BRIEF_JOB_NAME,
+            schedule=f"0 {hour} * * *",
+            script_path="",
+            description=_daily_brief_prompt(),
+            enabled=True,
+            created_at=time.time(),
+        )
+        jobs.append(job)
+    _write_jobs(jobs)
+    return {"ok": True, "enabled": enabled, "hour": hour}

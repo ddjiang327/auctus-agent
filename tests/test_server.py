@@ -10,6 +10,7 @@ import httpx
 from fastapi.testclient import TestClient
 
 from app.config import settings
+from app import runtime_state
 from app.server import app
 from app.version import APP_VERSION
 
@@ -34,6 +35,7 @@ class ServerApiTests(unittest.TestCase):
         self.client = TestClient(app)
 
     def tearDown(self):
+        runtime_state._STATE.clear()
         settings.workspace_dir = self.old_workspace
         settings.logs_dir = self.old_logs
         settings.model = self.old_model
@@ -107,6 +109,39 @@ class ServerApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["items"], [entries[-1]])
+
+    def test_runtime_state_tracks_permission_wait(self):
+        with patch("app.server._should_request_file_permission", return_value=True):
+            response = self.client.post(
+                "/api/chat",
+                json={"session_id": "state-session", "message": "读取 /tmp/example.md"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        state = self.client.get("/api/runtime-state/state-session").json()
+        self.assertEqual(state["status"], "waiting_for_user")
+        self.assertEqual(state["reason"], "waiting_for_file_permission")
+
+    def test_post_turn_review_refreshes_preferences_without_blocking_contract(self):
+        class ImmediateThread:
+            def __init__(self, target, *_, **__):
+                self.target = target
+
+            def start(self):
+                self.target()
+
+        with patch("app.server.threading.Thread", ImmediateThread):
+            with patch("app.server.preferences.maybe_store_preference_candidate", return_value={"ok": True, "created": True}) as candidate:
+                with patch("app.server.preferences.refresh_summary", return_value={"ok": True, "items": 2}) as refresh:
+                    from app.server import _schedule_post_turn_review
+                    _schedule_post_turn_review("review-session", "以后默认用中文", "好的", [])
+
+        candidate.assert_called_once()
+        refresh.assert_called_once()
+        log_path = settings.logs_dir / "turn_reviews.jsonl"
+        self.assertTrue(log_path.exists())
+        item = json.loads(log_path.read_text(encoding="utf-8").splitlines()[-1])
+        self.assertEqual(item["preference_summary_items"], 2)
 
     def test_task_mode_strips_hidden_update_marker_from_reply(self):
         marker = '<!--TASK_UPDATE {"current_step":3,"status":"in_progress","activity_key":"advanced"}-->'

@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import base64
 import mimetypes
+import platform
 import re
 import subprocess
 import time
@@ -29,6 +30,7 @@ from .config import settings
 from . import accounting
 from . import cronjobs
 from . import evolution
+from . import intent
 from . import memory
 from . import llm
 from . import terminal_sessions
@@ -998,6 +1000,18 @@ def _resolve_cron_job_id(name_or_id: str) -> Optional[str]:
     return None
 
 
+def create_event_trigger(
+    name: str,
+    trigger_type: str,
+    trigger_config: dict,
+    task: str,
+) -> dict:
+    """Create an event-triggered job. trigger_type: 'email_match' or 'url_watch'."""
+    return cronjobs.add_event_trigger(
+        name=name, trigger_type=trigger_type, trigger_config=trigger_config, task=task
+    )
+
+
 def delete_cron_job(name_or_id: str) -> dict:
     """删除已创建的定时任务。可以传 name 或 id。"""
     job_id = _resolve_cron_job_id(name_or_id)
@@ -1017,6 +1031,198 @@ def toggle_cron_job(name_or_id: str, enabled: bool) -> dict:
 def list_outputs() -> dict:
     files = [p.name for p in settings.output_dir.iterdir() if p.is_file()]
     return {"files": sorted(files, reverse=True)[:50]}
+
+
+def note_create(title: str, content: str, tags: str = "") -> dict:
+    """Save a note to data/notes/ and auto-index it into the local knowledge base."""
+    notes_dir = settings.data_dir / "notes"
+    notes_dir.mkdir(parents=True, exist_ok=True)
+    slug = re.sub(r"[^\w一-鿿]+", "_", title.strip())[:40] or "note"
+    ts = int(time.time())
+    filename = f"{ts}_{slug}.md"
+    tag_line = f"\n\ntags: {tags}" if tags.strip() else ""
+    body = f"# {title}\n\n{content.strip()}{tag_line}\n"
+    (notes_dir / filename).write_text(body, encoding="utf-8")
+    try:
+        from . import rag
+        rag.index_folder(str(notes_dir))
+    except Exception:
+        pass
+    return {"ok": True, "file": filename, "path": str(notes_dir / filename)}
+
+
+def note_list(limit: int = 20) -> dict:
+    """List recent notes from data/notes/."""
+    notes_dir = settings.data_dir / "notes"
+    if not notes_dir.exists():
+        return {"notes": []}
+    files = sorted(notes_dir.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True)[:limit]
+    result = []
+    for f in files:
+        first_line = ""
+        try:
+            first_line = f.read_text(encoding="utf-8").splitlines()[0].lstrip("# ").strip()
+        except Exception:
+            pass
+        result.append({"filename": f.name, "title": first_line or f.stem, "modified": f.stat().st_mtime})
+    return {"notes": result}
+
+
+def note_search(query: str, limit: int = 5) -> dict:
+    """Search notes using the local knowledge base (RAG)."""
+    try:
+        from . import rag
+        results = rag.search(query, k=limit)
+        notes_results = [r for r in results if "notes" in (r.get("folder") or r.get("file") or "")]
+        return {"results": notes_results or results}
+    except Exception:
+        notes_dir = settings.data_dir / "notes"
+        if not notes_dir.exists():
+            return {"results": []}
+        q = query.lower()
+        matches = []
+        for f in sorted(notes_dir.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True):
+            try:
+                text = f.read_text(encoding="utf-8")
+                if q in text.lower():
+                    matches.append({"file": f.name, "content": text[:400]})
+                    if len(matches) >= limit:
+                        break
+            except Exception:
+                continue
+        return {"results": matches}
+
+
+def _gh(args: list[str], timeout: int = 20) -> dict:
+    """Run a gh CLI command and return {ok, stdout, stderr}."""
+    try:
+        r = subprocess.run(
+            ["gh"] + args,
+            capture_output=True, text=True, timeout=timeout,
+        )
+        return {"ok": r.returncode == 0, "stdout": r.stdout.strip(), "stderr": r.stderr.strip()}
+    except FileNotFoundError:
+        return {"ok": False, "stdout": "", "stderr": "gh CLI not found. Install from https://cli.github.com"}
+    except Exception as exc:
+        return {"ok": False, "stdout": "", "stderr": str(exc)}
+
+
+def _gh_json(args: list[str], timeout: int = 20) -> tuple[bool, Any]:
+    """Run a gh CLI command expecting JSON output. Returns (ok, parsed)."""
+    result = _gh(args, timeout=timeout)
+    if not result["ok"]:
+        return False, result["stderr"]
+    try:
+        return True, json.loads(result["stdout"])
+    except json.JSONDecodeError:
+        return True, result["stdout"]
+
+
+def github_list_issues(repo: str = "", state: str = "open", limit: int = 20, label: str = "") -> dict:
+    """List GitHub issues for a repo (owner/name). Leave repo blank to use the current directory's repo."""
+    args = ["issue", "list", "--state", state, "--limit", str(min(int(limit), 100)), "--json",
+            "number,title,state,labels,createdAt,url,assignees"]
+    if repo.strip():
+        args += ["--repo", repo.strip()]
+    if label.strip():
+        args += ["--label", label.strip()]
+    ok, data = _gh_json(args)
+    if not ok:
+        return {"error": data}
+    return {"issues": data, "count": len(data) if isinstance(data, list) else 0}
+
+
+def github_get_issue(number: int, repo: str = "") -> dict:
+    """Get full details of a single GitHub issue including body and comments."""
+    args = ["issue", "view", str(int(number)), "--json",
+            "number,title,body,state,labels,comments,createdAt,url,assignees"]
+    if repo.strip():
+        args += ["--repo", repo.strip()]
+    ok, data = _gh_json(args)
+    if not ok:
+        return {"error": data}
+    return data if isinstance(data, dict) else {"data": data}
+
+
+def github_create_comment(number: int, body: str, repo: str = "") -> dict:
+    """Post a comment on a GitHub issue or PR."""
+    body = (body or "").strip()
+    if not body:
+        return {"error": "comment body is required"}
+    args = ["issue", "comment", str(int(number)), "--body", body]
+    if repo.strip():
+        args += ["--repo", repo.strip()]
+    result = _gh(args)
+    if not result["ok"]:
+        return {"error": result["stderr"]}
+    return {"ok": True, "number": number, "message": "comment posted"}
+
+
+def github_search_code(query: str, repo: str = "", limit: int = 10) -> dict:
+    """Search GitHub code. Wraps 'gh search code'."""
+    if not query.strip():
+        return {"error": "query is required"}
+    args = ["search", "code", query, "--limit", str(min(int(limit), 30)), "--json", "path,repository,url"]
+    if repo.strip():
+        args += ["--repo", repo.strip()]
+    ok, data = _gh_json(args)
+    if not ok:
+        return {"error": data}
+    return {"results": data, "count": len(data) if isinstance(data, list) else 0}
+
+
+def github_list_prs(repo: str = "", state: str = "open", limit: int = 20) -> dict:
+    """List pull requests for a GitHub repo."""
+    args = ["pr", "list", "--state", state, "--limit", str(min(int(limit), 100)), "--json",
+            "number,title,state,createdAt,url,headRefName,isDraft,reviewDecision"]
+    if repo.strip():
+        args += ["--repo", repo.strip()]
+    ok, data = _gh_json(args)
+    if not ok:
+        return {"error": data}
+    return {"prs": data, "count": len(data) if isinstance(data, list) else 0}
+
+
+def get_clipboard() -> dict:
+    """Read text currently on the system clipboard."""
+    sys = platform.system()
+    try:
+        if sys == "Darwin":
+            r = subprocess.run(["pbpaste"], capture_output=True, timeout=5)
+            text = r.stdout.decode("utf-8", errors="replace")
+        elif sys == "Linux":
+            r = subprocess.run(["xclip", "-selection", "clipboard", "-o"], capture_output=True, timeout=5)
+            if r.returncode != 0:
+                r = subprocess.run(["xsel", "--clipboard", "--output"], capture_output=True, timeout=5)
+            text = r.stdout.decode("utf-8", errors="replace")
+        elif sys == "Windows":
+            r = subprocess.run(["powershell", "-Command", "Get-Clipboard"], capture_output=True, timeout=5)
+            text = r.stdout.decode("utf-8", errors="replace").strip()
+        else:
+            return {"error": f"clipboard not supported on {sys}"}
+        return {"text": text, "length": len(text)}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+def set_clipboard(text: str) -> dict:
+    """Write text to the system clipboard so the user can paste it anywhere."""
+    sys = platform.system()
+    try:
+        if sys == "Darwin":
+            subprocess.run(["pbcopy"], input=text.encode("utf-8"), timeout=5, check=True)
+        elif sys == "Linux":
+            r = subprocess.run(["xclip", "-selection", "clipboard"], input=text.encode("utf-8"), timeout=5)
+            if r.returncode != 0:
+                subprocess.run(["xsel", "--clipboard", "--input"], input=text.encode("utf-8"), timeout=5, check=True)
+        elif sys == "Windows":
+            escaped = text.replace("'", "''")
+            subprocess.run(["powershell", "-Command", f"Set-Clipboard '{escaped}'"], timeout=5, check=True)
+        else:
+            return {"error": f"clipboard not supported on {sys}"}
+        return {"ok": True, "length": len(text)}
+    except Exception as exc:
+        return {"error": str(exc)}
 
 
 def fetch_webpage(url: str, max_chars: int = 12000) -> dict:
@@ -1273,6 +1479,19 @@ _RISK = {
     "remember": "medium",
     "recall": "low",
     "list_outputs": "low",
+    "get_clipboard": "low",
+    "set_clipboard": "low",
+    "list_calendar_events": "low",
+    "create_calendar_event": "medium",
+    "note_create": "low",
+    "note_list": "low",
+    "note_search": "low",
+    "create_event_trigger": "medium",
+    "github_list_issues": "low",
+    "github_get_issue": "low",
+    "github_create_comment": "medium",
+    "github_search_code": "low",
+    "github_list_prs": "low",
     "fetch_webpage": "low",
     "fetch_element": "low",
     "track_logistics": "low",
@@ -2120,6 +2339,182 @@ TOOL_SCHEMAS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "get_clipboard",
+            "description": "读取用户系统剪贴板里的文字内容。适合用户说'帮我处理剪贴板里的内容'、'翻译/总结/改写我刚才复制的文字'等场景。",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_clipboard",
+            "description": "把指定文字写入系统剪贴板，让用户可以直接粘贴使用。适合用户说'把结果复制到剪贴板'、'帮我生成一段话放到剪贴板'等场景。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "要写入剪贴板的文字内容"},
+                },
+                "required": ["text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "note_create",
+            "description": "把用户说的想法、信息、决定记录为笔记，保存到本地并自动进入知识库。用户说'记下来'、'帮我记一个笔记'、'存到笔记'时调用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "笔记标题"},
+                    "content": {"type": "string", "description": "笔记内容（Markdown 格式）"},
+                    "tags": {"type": "string", "description": "标签，逗号分隔（可选）"},
+                },
+                "required": ["title", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "note_list",
+            "description": "列出最近的笔记。用户说'我有哪些笔记'、'列一下我的记录'时调用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "description": "返回条数，默认 20"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "note_search",
+            "description": "搜索笔记内容。用户说'我记过什么关于X'、'帮我找一下有没有记过Y'时调用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "搜索关键词或自然语言问题"},
+                    "limit": {"type": "integer", "description": "返回条数，默认 5"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "github_list_issues",
+            "description": "列出 GitHub 仓库的 Issues。repo 格式为 owner/name，留空则自动使用当前目录所在仓库。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repo": {"type": "string", "description": "仓库路径 owner/name，可选"},
+                    "state": {"type": "string", "enum": ["open", "closed", "all"], "description": "状态过滤，默认 open"},
+                    "limit": {"type": "integer", "description": "返回条数，默认 20，最大 100"},
+                    "label": {"type": "string", "description": "按标签过滤，可选"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "github_get_issue",
+            "description": "获取 GitHub Issue 的完整内容，包括正文和评论。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "number": {"type": "integer", "description": "Issue 编号"},
+                    "repo": {"type": "string", "description": "仓库路径 owner/name，可选"},
+                },
+                "required": ["number"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "github_create_comment",
+            "description": "在 GitHub Issue 或 PR 下发表评论。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "number": {"type": "integer", "description": "Issue 或 PR 编号"},
+                    "body": {"type": "string", "description": "评论内容（支持 Markdown）"},
+                    "repo": {"type": "string", "description": "仓库路径 owner/name，可选"},
+                },
+                "required": ["number", "body"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "github_search_code",
+            "description": "在 GitHub 搜索代码。可用于查找函数定义、用法示例、特定字符串。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "搜索关键词，支持 GitHub 代码搜索语法"},
+                    "repo": {"type": "string", "description": "限定在指定仓库内搜索，owner/name 格式，可选"},
+                    "limit": {"type": "integer", "description": "返回条数，默认 10，最大 30"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "github_list_prs",
+            "description": "列出 GitHub 仓库的 Pull Requests。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repo": {"type": "string", "description": "仓库路径 owner/name，可选"},
+                    "state": {"type": "string", "enum": ["open", "closed", "merged", "all"], "description": "状态过滤，默认 open"},
+                    "limit": {"type": "integer", "description": "返回条数，默认 20，最大 100"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_calendar_events",
+            "description": "读取 macOS 日历中的日程，返回指定天数内的所有活动。适合'我下周有什么安排'、'帮我看看日历'等场景。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "days_ahead": {"type": "integer", "description": "查询未来多少天，默认 7，最多 90"},
+                    "calendar_name": {"type": "string", "description": "指定日历名称（留空则查询所有日历）"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_calendar_event",
+            "description": "在 macOS 日历中新建日程。适合'帮我明天10点加一个会议'、'设置一个提醒'等场景。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "日程标题"},
+                    "start_datetime": {"type": "string", "description": "开始时间，格式 'YYYY-MM-DD HH:MM'，例如 '2024-06-15 10:00'"},
+                    "end_datetime": {"type": "string", "description": "结束时间，格式同上（留空则自动加 1 小时）"},
+                    "notes": {"type": "string", "description": "备注（可选）"},
+                    "calendar_name": {"type": "string", "description": "目标日历名称（留空则用默认日历）"},
+                },
+                "required": ["title", "start_datetime"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "fetch_webpage",
             "description": "读取一个公开 http/https 网页并提取可读文本。适合用户要求查看网页、总结网页或基于 URL 做分析。不支持登录后页面，也不做搜索引擎检索。",
             "parameters": {
@@ -2278,8 +2673,35 @@ TOOL_SCHEMAS: list[dict] = [
         "type": "function",
         "function": {
             "name": "list_cron_jobs",
-            "description": "列出所有已注册的定时任务。",
+            "description": "列出所有已注册的定时任务（包括事件触发器）。",
             "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_event_trigger",
+            "description": "创建事件触发任务：监听邮件关键词（email_match）或网页内容变化（url_watch），条件满足时自动执行指定任务。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "触发器名称，方便识别"},
+                    "trigger_type": {
+                        "type": "string",
+                        "enum": ["email_match", "url_watch"],
+                        "description": "触发类型：email_match=邮件关键词匹配，url_watch=网页内容变化",
+                    },
+                    "trigger_config": {
+                        "type": "object",
+                        "description": (
+                            "触发配置。email_match 需要 {account_id, keyword}；"
+                            "url_watch 需要 {url}，可选 {selector, match_text}"
+                        ),
+                    },
+                    "task": {"type": "string", "description": "触发条件满足时要执行的任务描述"},
+                },
+                "required": ["name", "trigger_type", "trigger_config", "task"],
+            },
         },
     },
     {
@@ -2612,7 +3034,13 @@ _BASE_TOOL_NAMES = {
     "make_webpage",
     "make_react_prototype",
     "list_outputs",
+    "get_clipboard",
+    "set_clipboard",
     "recall",
+    "list_calendar_events",
+    "note_create",
+    "note_list",
+    "note_search",
     "list_memories",
 }
 _RESEARCH_TOOL_NAMES = {
@@ -2654,7 +3082,7 @@ _EMAIL_TOOL_NAMES = {
     "archive_email_tool",
 }
 _MEMORY_TOOL_NAMES = {"extract_memory_candidates", "remember", "confirm_memory", "forget_memory"}
-_SCHEDULE_TOOL_NAMES = {"create_cron_job", "list_cron_jobs", "delete_cron_job", "toggle_cron_job"}
+_SCHEDULE_TOOL_NAMES = {"create_cron_job", "list_cron_jobs", "delete_cron_job", "toggle_cron_job", "create_event_trigger"}
 _MEDIA_TOOL_NAMES = {"generate_image", "text_to_speech"}
 _SUBAGENT_TOOL_NAMES = {"run_parallel_subagents"}
 _INTEGRATION_TOOL_NAMES = {
@@ -2668,7 +3096,11 @@ _INTEGRATION_TOOL_NAMES = {
 _SCHEMA_BY_NAME = {_sch["function"]["name"]: _sch for _sch in TOOL_SCHEMAS}
 
 
-def tool_schemas_for(user_text: str, extra_system_context: str | None = None) -> list[dict]:
+def tool_schemas_for(
+    user_text: str,
+    extra_system_context: str | None = None,
+    intent_decision: dict | None = None,
+) -> list[dict]:
     """Return a smaller tool set for the current task.
 
     Exposing every tool on every turn makes function selection noisier as the
@@ -2677,24 +3109,30 @@ def tool_schemas_for(user_text: str, extra_system_context: str | None = None) ->
     context.
     """
     text = f"{user_text or ''}\n{extra_system_context or ''}".lower()
+    intent_decision = intent_decision or intent.classify(user_text, extra_system_context=extra_system_context)
+    domains = set(intent_decision.get("domains") or [])
     names = set(_BASE_TOOL_NAMES)
 
-    if _has_any(text, ("search", "browse", "web", "website", "url", "price", "quote", "insurance", "travel", "news", "latest", "stock", "source", "research", "compare", "购买", "买", "报价", "保险", "旅行", "新闻", "最新", "库存", "来源", "搜索", "网页", "对比", "research_comparison")):
+    if "research" in domains or _has_any(text, ("search", "browse", "web", "website", "url", "price", "quote", "insurance", "travel", "news", "latest", "stock", "source", "research", "compare", "购买", "买", "报价", "保险", "旅行", "新闻", "最新", "库存", "来源", "搜索", "网页", "对比", "research_comparison")):
         names |= _RESEARCH_TOOL_NAMES
         if "[subagent]" not in text and _has_any(text, ("compare", "research", "multiple", "several", "各", "多个", "几家", "比较", "对比", "分别", "research_comparison")):
             names |= _SUBAGENT_TOOL_NAMES
-    if _has_any(text, ("terminal", "command", "shell", "run ", "execute", "test", "build", "server", "python", "npm", "git", "代码", "命令", "终端", "运行", "执行", "测试", "构建", "启动", "technical")):
+    if "technical" in domains or _has_any(text, ("terminal", "command", "shell", "run ", "execute", "test", "build", "server", "python", "npm", "git", "代码", "命令", "终端", "运行", "执行", "测试", "构建", "启动", "technical")):
         names |= _TERMINAL_TOOL_NAMES
-    if _has_any(text, ("email", "mail", "inbox", "imap", "smtp", "reply", "邮件", "邮箱", "收件箱", "回复邮件")):
+    if "email" in domains or _has_any(text, ("email", "mail", "inbox", "imap", "smtp", "reply", "邮件", "邮箱", "收件箱", "回复邮件")):
         names |= _EMAIL_TOOL_NAMES
-    if _has_any(text, ("remember", "memory", "forget", "记住", "记忆", "忘记")):
+    if "memory" in domains or _has_any(text, ("remember", "memory", "forget", "记住", "记忆", "忘记")):
         names |= _MEMORY_TOOL_NAMES
-    if _has_any(text, ("cron", "schedule", "every day", "weekly", "remind", "定时", "计划任务", "提醒", "每天", "每周")):
+    if "automation" in domains or _has_any(text, ("cron", "schedule", "every day", "weekly", "remind", "watch", "monitor", "trigger", "event trigger", "url_watch", "email_match", "定时", "计划任务", "提醒", "每天", "每周", "监听", "监控", "触发器", "事件触发", "网页变化", "邮件关键词")):
         names |= _SCHEDULE_TOOL_NAMES
     if _has_any(text, ("image", "picture", "draw", "generate image", "tts", "speech", "audio", "voice", "图片", "画", "生成图", "语音", "朗读", "音频", "creation")):
         names |= _MEDIA_TOOL_NAMES
+    if "calendar" in domains or _has_any(text, ("calendar", "event", "schedule", "meeting", "appointment", "日历", "日程", "会议", "提醒", "安排", "预约")):
+        names |= {"list_calendar_events", "create_calendar_event"}
     if _has_any(text, ("telegram", "feishu", "lark", "discord", "iot", "home assistant", "飞书", "机器人", "集成", "智能家居")):
         names |= _INTEGRATION_TOOL_NAMES
+    if "github" in domains or _has_any(text, ("github", "issue", "pull request", "pr", "gh ", "repository", "repo", "代码搜索", "issues", "pr列表")):
+        names |= {"github_list_issues", "github_get_issue", "github_create_comment", "github_search_code", "github_list_prs"}
 
     ordered = [_SCHEMA_BY_NAME[name] for name in _schema_order() if name in names and name in _SCHEMA_BY_NAME]
     return ordered or TOOL_SCHEMAS
@@ -2738,6 +3176,19 @@ _DISPATCH = {
     "remember": remember,
     "recall": recall,
     "list_outputs": list_outputs,
+    "get_clipboard": get_clipboard,
+    "set_clipboard": set_clipboard,
+    "note_create": note_create,
+    "note_list": note_list,
+    "note_search": note_search,
+    "create_event_trigger": create_event_trigger,
+    "github_list_issues": github_list_issues,
+    "github_get_issue": github_get_issue,
+    "github_create_comment": github_create_comment,
+    "github_search_code": github_search_code,
+    "github_list_prs": github_list_prs,
+    "list_calendar_events": lambda days_ahead=7, calendar_name="": _calendar_call("list_calendar_events", days_ahead=days_ahead, calendar_name=calendar_name),
+    "create_calendar_event": lambda title, start_datetime, end_datetime="", notes="", calendar_name="": _calendar_call("create_calendar_event", title=title, start_datetime=start_datetime, end_datetime=end_datetime, notes=notes, calendar_name=calendar_name),
     "fetch_webpage": fetch_webpage,
     "fetch_element": fetch_element,
     "track_logistics": track_logistics,
@@ -2814,6 +3265,18 @@ def _browser_call(fn_name: str, **kwargs) -> dict:
     fn = getattr(tools_browser, fn_name, None)
     if fn is None:
         return {"error": f"unknown browser tool: {fn_name}"}
+    return fn(**kwargs)
+
+
+def _calendar_call(fn_name: str, **kwargs) -> dict:
+    """Lazy bridge to tools_calendar — avoids importing osascript until first calendar tool is used."""
+    try:
+        from . import tools_calendar
+    except Exception as exc:
+        return {"error": f"calendar module unavailable: {type(exc).__name__}: {exc}"}
+    fn = getattr(tools_calendar, fn_name, None)
+    if fn is None:
+        return {"error": f"unknown calendar tool: {fn_name}"}
     return fn(**kwargs)
 
 

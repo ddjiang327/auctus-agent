@@ -1,7 +1,74 @@
-"""Domain playbooks injected into the agent prompt for common task types."""
+"""Domain playbooks injected into the agent prompt for common task types.
+
+Two kinds:
+  - Built-in: hardcoded Python functions below (shopping, laptop, insurance).
+  - User-defined: stored in data/playbooks.json, editable via the UI.
+"""
 from __future__ import annotations
 
+import json
 import re
+import time
+import uuid
+from pathlib import Path
+
+from .config import settings
+
+_USER_PLAYBOOKS_PATH: Path = settings.data_dir / "playbooks.json"
+
+
+def _read_user_playbooks() -> list[dict]:
+    if not _USER_PLAYBOOKS_PATH.exists():
+        return []
+    try:
+        data = json.loads(_USER_PLAYBOOKS_PATH.read_text(encoding="utf-8"))
+        return data.get("playbooks", [])
+    except Exception:
+        return []
+
+
+def _write_user_playbooks(playbooks: list[dict]) -> None:
+    _USER_PLAYBOOKS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _USER_PLAYBOOKS_PATH.write_text(
+        json.dumps({"playbooks": playbooks}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def list_playbooks() -> list[dict]:
+    return _read_user_playbooks()
+
+
+def add_playbook(name: str, trigger: str, content: str) -> dict:
+    pb = {
+        "id": uuid.uuid4().hex[:10],
+        "name": name.strip(),
+        "trigger": trigger.strip(),
+        "content": content.strip(),
+        "enabled": True,
+        "created_at": time.time(),
+    }
+    pbs = _read_user_playbooks()
+    pbs.append(pb)
+    _write_user_playbooks(pbs)
+    return pb
+
+
+def update_playbook(pb_id: str, **fields) -> dict:
+    pbs = _read_user_playbooks()
+    allowed = {"name", "trigger", "content", "enabled"}
+    for pb in pbs:
+        if pb["id"] == pb_id:
+            pb.update({k: v for k, v in fields.items() if k in allowed})
+    _write_user_playbooks(pbs)
+    return next((p for p in pbs if p["id"] == pb_id), {})
+
+
+def remove_playbook(pb_id: str) -> bool:
+    pbs = _read_user_playbooks()
+    new_pbs = [p for p in pbs if p["id"] != pb_id]
+    _write_user_playbooks(new_pbs)
+    return len(new_pbs) < len(pbs)
 
 
 _SHOPPING_PATTERNS = (
@@ -33,6 +100,13 @@ def context_for(user_text: str) -> str:
         blocks.append(_laptop_context())
     if _matches(text, _INSURANCE_PATTERNS):
         blocks.append(_insurance_context())
+    for pb in _read_user_playbooks():
+        if not pb.get("enabled"):
+            continue
+        trigger = (pb.get("trigger") or "").strip()
+        content = (pb.get("content") or "").strip()
+        if trigger and content and re.search(trigger, text, re.IGNORECASE):
+            blocks.append(content)
     return "\n\n".join(blocks)
 
 

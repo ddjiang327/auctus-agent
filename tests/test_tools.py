@@ -76,6 +76,11 @@ class ToolSafetyTests(unittest.TestCase):
         sub_names = {schema["function"]["name"] for schema in tools.tool_schemas_for("比较三家保险", extra_system_context="[SUBAGENT]")}
         self.assertNotIn("run_parallel_subagents", sub_names)
 
+    def test_tool_router_adds_event_trigger_from_intent(self):
+        names = {schema["function"]["name"] for schema in tools.tool_schemas_for("监听这个网页变化 https://example.com")}
+
+        self.assertIn("create_event_trigger", names)
+
     def test_run_parallel_subagents_dispatches_to_module(self):
         with patch("app.subagent.run_parallel_subagents", return_value={"ok": True, "count": 1}) as runner:
             result = tools.run_tool(

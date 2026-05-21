@@ -5,6 +5,7 @@ import json
 import re
 import sqlite3
 import struct
+import threading
 import uuid
 import zlib
 from pathlib import Path
@@ -17,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 import litellm
 from pydantic import BaseModel
 
-from . import accounting, agent, evidence, memory, relay, session_control, task_mode, tools
+from . import accounting, agent, evidence, intent, memory, preferences, relay, routing, runtime_state, session_control, task_mode, tools
 from .config import settings
 from .version import API_COMPAT_VERSION, APP_NAME, APP_VERSION, RELEASE_CHANNEL
 
@@ -2458,6 +2459,7 @@ def chat(body: ChatIn) -> ChatOut:
         and len(active_task.get("activity") or []) <= 2
     )
     if _should_request_file_permission(body.message, file_permission):
+        runtime_state.set_state(sid, "waiting_for_user", "waiting_for_file_permission", permission="files")
         return ChatOut(
             session_id=sid,
             reply="",
@@ -2469,6 +2471,7 @@ def chat(body: ChatIn) -> ChatOut:
             },
         )
     if _should_request_calendar_permission(body.message, calendar_permission):
+        runtime_state.set_state(sid, "waiting_for_user", "waiting_for_calendar_permission", permission="calendar")
         return ChatOut(
             session_id=sid,
             reply="",
@@ -2480,6 +2483,7 @@ def chat(body: ChatIn) -> ChatOut:
             },
         )
     if _should_request_terminal_permission(body.message, terminal_permission):
+        runtime_state.set_state(sid, "waiting_for_user", "waiting_for_terminal_permission", permission="terminal")
         return ChatOut(
             session_id=sid,
             reply="",
@@ -2491,14 +2495,17 @@ def chat(body: ChatIn) -> ChatOut:
             },
         )
     if calendar_permission == "no":
+        runtime_state.set_state(sid, "blocked", "calendar_permission_denied")
         return ChatOut(
             session_id=sid,
             reply="好的，这次我不访问系统日历/提醒事项。如果你愿意，我可以帮你生成一个 .ics 文件，你导入到日历即可。",
             task=active_task,
         )
     if terminal_permission == "no":
+        runtime_state.set_state(sid, "blocked", "terminal_permission_denied")
         return ChatOut(session_id=sid, reply="好的，这次不执行终端命令。", task=active_task)
     if file_permission == "no":
+        runtime_state.set_state(sid, "blocked", "file_permission_denied")
         return ChatOut(
             session_id=sid,
             task=active_task,
@@ -2521,6 +2528,7 @@ def chat(body: ChatIn) -> ChatOut:
             "上一条任务仍在执行中，60 秒内未能停止。请稍后重试，或重启 Auctus Agent。",
         )
     try:
+        runtime_state.set_state(sid, "running", "chat_started")
         session_control.reset_stop(sid)
         message = body.message
         file_scope_override = None
@@ -2587,6 +2595,7 @@ def chat(body: ChatIn) -> ChatOut:
     except HTTPException:
         raise
     except Exception as e:
+        runtime_state.set_state(sid, "blocked", "runtime_error")
         raise HTTPException(503, _friendly_runtime_error(str(e)))
     finally:
         lock.release()
@@ -2595,6 +2604,8 @@ def chat(body: ChatIn) -> ChatOut:
     if active_task:
         active_task = task_mode.mark_after_reply(sid, reply) or active_task
         reply = task_mode.strip_update_markers(reply)
+    runtime_state.set_state(sid, "idle", "chat_completed")
+    _schedule_post_turn_review(sid, body.message, reply, files)
     return ChatOut(session_id=sid, reply=reply, files=files, task=active_task)
 
 
@@ -2659,6 +2670,56 @@ def chat_stop(body: dict) -> dict:
     return {"ok": True, "session_id": sid}
 
 
+def _schedule_post_turn_review(session_id: str, user_text: str, reply: str, files: list[str]) -> None:
+    """Write a cheap post-turn review in the background.
+
+    This deliberately avoids LLM/RAG/tool calls so it cannot slow the response.
+    """
+    import time as _time
+
+    def _run() -> None:
+        try:
+            item = intent.review_summary(session_id, user_text, reply, files)
+            preference_candidate = preferences.maybe_store_preference_candidate(user_text, reply)
+            profile = preferences.refresh_summary()
+            item["ts"] = _time.time()
+            item["reply_chars"] = len(reply or "")
+            item["preference_candidate"] = preference_candidate
+            item["preference_summary_items"] = profile.get("items", 0)
+            path = settings.logs_dir / "turn_reviews.jsonl"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(item, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+
+    threading.Thread(target=_run, daemon=True, name="turn-review").start()
+
+
+@app.get("/api/runtime-state/{session_id}")
+def get_runtime_state(session_id: str) -> dict:
+    return runtime_state.get_state(session_id)
+
+
+@app.get("/api/runtime-states")
+def list_runtime_states(limit: int = Query(50, ge=1, le=200)) -> dict:
+    return {"items": runtime_state.list_states(limit=limit)}
+
+
+@app.get("/api/preferences/summary")
+def get_preference_summary() -> dict:
+    state = accounting.get_setup_state()
+    return {
+        "summary": preferences.get_summary(max_chars=1200),
+        "updated_at": float(state.get(preferences.UPDATED_KEY) or 0),
+    }
+
+
+@app.post("/api/preferences/summary/refresh")
+def refresh_preference_summary() -> dict:
+    return preferences.refresh_summary()
+
+
 @app.post("/api/upload")
 async def upload_file(
     request: Request,
@@ -2679,18 +2740,36 @@ async def upload_file(
 
 
 @app.get("/api/logs")
-def logs(tail: int = Query(50, ge=1, le=500)) -> dict:
+def logs(
+    tail: int = Query(50, ge=1, le=500),
+    tool: Optional[str] = Query(None),
+    risk: Optional[str] = Query(None),
+    q: Optional[str] = Query(None),
+    limit: int = Query(200, ge=1, le=2000),
+) -> dict:
     log_path = settings.logs_dir / "tool_calls.jsonl"
     if not log_path.exists():
-        return {"items": []}
+        return {"items": [], "total": 0}
     raw_lines = [line for line in log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
-    items: list[dict] = []
-    for raw in raw_lines[-tail:]:
+    all_items: list[dict] = []
+    for raw in reversed(raw_lines):
         try:
-            items.append(json.loads(raw))
+            all_items.append(json.loads(raw))
         except json.JSONDecodeError:
             continue
-    return {"items": items}
+    filtered: list[dict] = []
+    q_lower = (q or "").lower()
+    for item in all_items:
+        if tool and item.get("tool_name") != tool:
+            continue
+        if risk and item.get("risk_level") != risk:
+            continue
+        if q_lower and q_lower not in item.get("tool_name", "").lower() and q_lower not in json.dumps(item.get("tool_input", {})).lower():
+            continue
+        filtered.append(item)
+        if len(filtered) >= limit:
+            break
+    return {"items": filtered[:tail], "total": len(raw_lines)}
 
 
 @app.get("/api/memories", response_model=MemoryListOut)
@@ -3451,6 +3530,226 @@ def billing_state() -> dict:
         "usage": summary,
         "route": accounting.current_route(),
     }
+
+
+@app.get("/api/pinned-context")
+def get_pinned_context():
+    state = accounting.get_setup_state()
+    return {"pinned_context": state.get("pinned_context", "")}
+
+
+@app.post("/api/pinned-context")
+async def save_pinned_context(request: Request):
+    body = await request.json()
+    accounting.set_setup_state({"pinned_context": str(body.get("pinned_context") or "")})
+    return {"ok": True}
+
+
+@app.get("/api/playbooks")
+def list_playbooks():
+    from . import playbooks as pb_mod
+    return {"playbooks": pb_mod.list_playbooks()}
+
+
+class PlaybookBody(BaseModel):
+    name: str
+    trigger: str
+    content: str
+
+
+@app.post("/api/playbooks")
+def create_playbook(body: PlaybookBody):
+    from . import playbooks as pb_mod
+    pb = pb_mod.add_playbook(body.name, body.trigger, body.content)
+    return {"ok": True, "playbook": pb}
+
+
+class PlaybookUpdate(BaseModel):
+    name: Optional[str] = None
+    trigger: Optional[str] = None
+    content: Optional[str] = None
+    enabled: Optional[bool] = None
+
+
+@app.put("/api/playbooks/{pb_id}")
+def update_playbook(pb_id: str, body: PlaybookUpdate):
+    from . import playbooks as pb_mod
+    fields = {k: v for k, v in body.model_dump().items() if v is not None}
+    updated = pb_mod.update_playbook(pb_id, **fields)
+    return {"ok": True, "playbook": updated}
+
+
+@app.delete("/api/playbooks/{pb_id}")
+def delete_playbook(pb_id: str):
+    from . import playbooks as pb_mod
+    removed = pb_mod.remove_playbook(pb_id)
+    return {"ok": removed}
+
+
+@app.get("/api/daily-brief/config")
+def get_daily_brief_config():
+    from . import cronjobs
+    return cronjobs.get_daily_brief_config()
+
+
+class DailyBriefBody(BaseModel):
+    enabled: bool
+    hour: int = 8
+
+
+@app.post("/api/daily-brief/config")
+def set_daily_brief_config(body: DailyBriefBody):
+    from . import cronjobs
+    return cronjobs.set_daily_brief(body.enabled, body.hour)
+
+
+@app.get("/api/stats")
+def get_stats():
+    import time as _time
+    from datetime import date, timedelta
+    now = _time.time()
+    week_ago = now - 7 * 86400
+
+    daily = []
+    for i in range(6, -1, -1):
+        day = date.today() - timedelta(days=i)
+        report = accounting.daily_cost_report(day=day)
+        daily.append({
+            "date": report["date"],
+            "calls": report["calls"],
+            "cost": round(report["cost"], 4),
+        })
+
+    week_summary = accounting.usage_summary(since=week_ago)
+    sessions = memory.list_sessions(limit=1000)
+    try:
+        output_count = sum(1 for p in settings.output_dir.rglob("*") if p.is_file())
+    except Exception:
+        output_count = 0
+
+    by_tool = week_summary.get("by_tool") or {}
+    top_tools = sorted(by_tool.items(), key=lambda x: x[1].get("calls", 0), reverse=True)[:5]
+
+    return {
+        "daily": daily,
+        "week": {
+            "calls": week_summary["calls"],
+            "cost": round(week_summary["cost"], 4),
+            "total_tokens": week_summary["total_tokens"],
+        },
+        "sessions_total": len(sessions),
+        "files_total": output_count,
+        "top_tools": [{"name": k, "calls": v.get("calls", 0)} for k, v in top_tools],
+    }
+
+
+class ModelRoutingBody(BaseModel):
+    enabled: bool
+    fast: str = ""
+    standard: str = ""
+    deep: str = ""
+
+
+@app.get("/api/model-routing")
+def get_model_routing():
+    cfg = routing.get_config()
+    cfg["available"] = _available_models()
+    return cfg
+
+
+@app.post("/api/model-routing")
+def save_model_routing(body: ModelRoutingBody):
+    return routing.set_config(
+        enabled=body.enabled,
+        fast=body.fast,
+        standard=body.standard,
+        deep=body.deep,
+    )
+
+
+class RagIndexBody(BaseModel):
+    folder: str
+
+
+@app.post("/api/rag/index")
+async def rag_index(body: RagIndexBody):
+    import asyncio
+    from . import rag
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, rag.index_folder, body.folder)
+    return result
+
+
+@app.get("/api/rag/folders")
+def rag_folders():
+    from . import rag
+    return {"folders": rag.get_indexed_folders()}
+
+
+@app.delete("/api/rag/folder")
+async def rag_remove_folder(folder: str = Query(...)):
+    from . import rag
+    return rag.remove_folder(folder)
+
+
+@app.get("/api/outputs")
+def list_outputs():
+    """List generated files in outputs/ directory, newest first."""
+    import os
+    output_dir = settings.output_dir
+    files: list[dict] = []
+    try:
+        for root, dirs, filenames in os.walk(output_dir):
+            dirs[:] = sorted(dirs)
+            for fname in sorted(filenames):
+                fpath = Path(root) / fname
+                try:
+                    stat = fpath.stat()
+                    rel = fpath.relative_to(output_dir)
+                    ext = fpath.suffix.lower()
+                    files.append({
+                        "name": fname,
+                        "path": str(rel),
+                        "url": f"/files/{str(rel).replace(chr(92), '/')}",
+                        "size": stat.st_size,
+                        "modified": stat.st_mtime,
+                        "type": _output_file_type(ext),
+                    })
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    files.sort(key=lambda f: f["modified"], reverse=True)
+    return {"files": files}
+
+
+def _output_file_type(ext: str) -> str:
+    if ext in {".md", ".txt"}: return "text"
+    if ext in {".html", ".htm"}: return "html"
+    if ext in {".xlsx", ".xls", ".csv"}: return "spreadsheet"
+    if ext in {".png", ".jpg", ".jpeg", ".webp", ".gif"}: return "image"
+    if ext == ".pdf": return "pdf"
+    return "other"
+
+
+@app.get("/api/history/sessions")
+def list_history_sessions(limit: int = Query(50, ge=1, le=200)):
+    """List recent conversation sessions with previews."""
+    return {"sessions": memory.list_sessions(limit=limit)}
+
+
+@app.get("/api/history/search")
+def search_history(
+    q: str = Query(""),
+    session_id: str = Query(""),
+    limit: int = Query(40, ge=1, le=200),
+):
+    """Search conversation messages by keyword."""
+    return {"messages": memory.search_messages(
+        q=q,
+        session_id=session_id or None,
+        limit=limit,
+    )}
 
 
 @app.get("/healthz")

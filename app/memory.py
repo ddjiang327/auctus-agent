@@ -207,6 +207,60 @@ def write_summary(session_id: str, content: str, covers_until_msg_id: int) -> No
         ))
 
 
+# ---------- 会话历史查询 ----------
+
+def list_sessions(limit: int = 50) -> list[dict]:
+    """List distinct session IDs with message counts and timestamps."""
+    with db_session() as s:
+        rows = s.execute(
+            text(
+                "SELECT session_id, COUNT(*) as msg_count, MIN(ts) as first_ts, MAX(ts) as last_ts "
+                "FROM messages WHERE role IN ('user', 'assistant') "
+                "GROUP BY session_id ORDER BY last_ts DESC LIMIT :limit"
+            ),
+            {"limit": limit},
+        ).fetchall()
+        result = []
+        for r in rows:
+            preview_stmt = (
+                select(Message.content)
+                .where(Message.session_id == r.session_id, Message.role == "user")
+                .order_by(Message.id.asc())
+                .limit(1)
+            )
+            first_msg = s.scalars(preview_stmt).first() or ""
+            result.append({
+                "session_id": r.session_id,
+                "msg_count": r.msg_count,
+                "first_ts": r.first_ts,
+                "last_ts": r.last_ts,
+                "preview": first_msg[:120],
+            })
+        return result
+
+
+def search_messages(q: str = "", session_id: Optional[str] = None, limit: int = 40) -> list[dict]:
+    """Search messages by keyword, optionally scoped to a session."""
+    with db_session() as s:
+        stmt = select(Message).where(Message.role.in_(["user", "assistant"]))
+        if q:
+            stmt = stmt.where(Message.content.contains(q))
+        if session_id:
+            stmt = stmt.where(Message.session_id == session_id)
+        stmt = stmt.order_by(Message.ts.desc()).limit(limit)
+        rows = list(s.scalars(stmt))
+        return [
+            {
+                "id": r.id,
+                "session_id": r.session_id,
+                "role": r.role,
+                "content": (r.content or "")[:500],
+                "ts": r.ts,
+            }
+            for r in rows
+        ]
+
+
 # ---------- 长期记忆 API ----------
 
 def remember(

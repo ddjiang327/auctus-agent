@@ -20,30 +20,32 @@ def chat_completion(
     messages: list[dict[str, Any]],
     tools: Optional[list[dict[str, Any]]] = None,
     temperature: float = 0.2,
+    model: str = "",
 ) -> dict[str, Any]:
     """同步走一轮 chat completion。
 
     返回的是 LiteLLM 标准化后的响应（OpenAI 格式），可以直接读
     `response["choices"][0]["message"]`。
+    model 参数可覆盖 settings.model，用于智能路由。
     """
+    effective_model = model or settings.model
     if accounting.current_route() == "proxy":
-        return _proxy_chat_completion(messages=messages, tools=tools, temperature=temperature)
+        return _proxy_chat_completion(messages=messages, tools=tools, temperature=temperature, model=effective_model)
 
     kwargs: dict[str, Any] = {
-        "model": settings.model,
+        "model": effective_model,
         "messages": messages,
         "temperature": temperature,
     }
-    kwargs.update(_route_kwargs(settings.model))
+    kwargs.update(_route_kwargs(effective_model))
     if tools:
         kwargs["tools"] = tools
         kwargs["tool_choice"] = "auto"
 
     resp = litellm.completion(**kwargs)
-    # LiteLLM 返回的对象可以 dict 化
     data = resp.model_dump() if hasattr(resp, "model_dump") else dict(resp)
     accounting.record_model_call(
-        model=data.get("model", settings.model),
+        model=data.get("model", effective_model),
         usage=data.get("usage") or {},
         cost=data.get("response_cost"),
     )
@@ -77,10 +79,12 @@ def _proxy_chat_completion(
     messages: list[dict[str, Any]],
     tools: Optional[list[dict[str, Any]]] = None,
     temperature: float = 0.2,
+    model: str = "",
 ) -> dict[str, Any]:
+    effective_model = model or settings.model
     endpoint, api_key = _proxy_endpoint_and_key()
     body: dict[str, Any] = {
-        "model": _relay_model_id(settings.model),
+        "model": _relay_model_id(effective_model),
         "messages": messages,
         "temperature": temperature,
     }
@@ -103,7 +107,7 @@ def _proxy_chat_completion(
 
     data = response.json()
     accounting.record_model_call(
-        model=data.get("model", settings.model),
+        model=data.get("model", effective_model),
         usage=data.get("usage") or {},
         cost=data.get("response_cost"),
     )
