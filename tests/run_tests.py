@@ -186,24 +186,6 @@ class TestRunner:
         else:
             return TestResult(test_id, name, category, 'fail', duration, '; '.join(errors))
     
-    def test_desktop_enhanced_syntax(self) -> TestResult:
-        """Test desktop_enhanced.py syntax."""
-        test_id = "desktop_syntax"
-        name = "Desktop Enhanced Syntax"
-        category = "desktop"
-        
-        start = time.time()
-        success, stdout, stderr = self.run_command(
-            [PYTHON, '-m', 'py_compile', 'app/desktop_enhanced.py'],
-            timeout=10
-        )
-        duration = time.time() - start
-        
-        if success:
-            return TestResult(test_id, name, category, 'pass', duration, "Syntax OK")
-        else:
-            return TestResult(test_id, name, category, 'fail', duration, f"Syntax error: {stderr}")
-    
     def test_ui_html_exists(self) -> TestResult:
         """Test UI HTML exists."""
         test_id = "ui_html"
@@ -259,9 +241,6 @@ class TestRunner:
             'build': [
                 self.test_build_scripts_exist,
                 self.test_build_script_syntax,
-            ],
-            'desktop': [
-                self.test_desktop_enhanced_syntax,
             ],
             'deps': [
                 self.test_requirements_txt,

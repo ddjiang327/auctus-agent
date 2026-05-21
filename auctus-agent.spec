@@ -45,11 +45,21 @@ a = Analysis(
         "app.accounting",
         "app.cronjobs",
         "app.email_client",
+        "app.evidence",
         "app.evolution",
         "app.feishu_bot",
         "app.maintenance",
+        "app.playbooks",
         "app.relay",
+        "app.discord_bot",
+        "app.search_providers",
+        "app.session_control",
+        "app.subagent",
+        "app.task_mode",
         "app.telegram_bot",
+        "app.tools_browser",
+        "app.tools_image",
+        "app.tools_tts",
         "app.version",
         # uvicorn internals not auto-detected by PyInstaller
         "uvicorn.logging",
@@ -81,6 +91,9 @@ a = Analysis(
         "h11",
         "httpcore",
         "httpx",
+        "requests",
+        "bs4",
+        "lxml",
         # QR code generation (mobile pairing page)
         "qrcode",
         "qrcode.image.svg",
@@ -94,6 +107,15 @@ a = Analysis(
         "webview.platforms.gtk",             # Linux
         # relay client
         "app.relay_client",
+        # search providers
+        "ddgs",
+        # browser automation
+        "playwright",
+        "playwright.sync_api",
+        # cron scheduler
+        "croniter",
+        # discord bot
+        "discord",
     ] + tiktoken_ext_hiddenimports + lark_oapi_hiddenimports,
     hookspath=[],
     hooksconfig={},

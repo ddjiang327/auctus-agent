@@ -492,3 +492,100 @@ def list_windows_scheduler_tasks() -> list[dict[str, Any]]:
         return tasks
     except Exception:
         return []
+
+
+# ─────────────────────────── in-process scheduler ─────────────────────────────
+# Fires jobs from within the running app (no system crontab needed).
+# Critical for the PyInstaller standalone bundle where users cannot edit crontab.
+
+import logging as _logging
+import threading as _threading
+from datetime import datetime as _dt, timedelta as _td
+
+_log = _logging.getLogger(__name__)
+_stop_event = _threading.Event()
+_scheduler_thread: Optional[_threading.Thread] = None
+_runs_log = (settings.logs_dir / "cron_runs.jsonl").resolve()
+
+
+def _job_due(schedule: str, now: _dt) -> bool:
+    """Return True iff this cron expression matches the given minute."""
+    try:
+        from croniter import croniter
+    except ImportError:
+        return False
+    base = now.replace(second=0, microsecond=0)
+    try:
+        # Start the iterator one minute before `base`; if `base` matches the cron,
+        # get_next() will return exactly `base`.
+        prev = base - _td(minutes=1)
+        itr = croniter(schedule, prev)
+        nxt = itr.get_next(_dt)
+        return (nxt.year == base.year and nxt.month == base.month and nxt.day == base.day
+                and nxt.hour == base.hour and nxt.minute == base.minute)
+    except Exception as exc:
+        _log.warning("cron parse failed for %r: %s", schedule, exc)
+        return False
+
+
+def _log_run(job: CronJob, status: str, summary: str) -> None:
+    record = {
+        "ts": time.time(),
+        "iso": _dt.now().isoformat(timespec="seconds"),
+        "job_id": job.id,
+        "job_name": job.name,
+        "schedule": job.schedule,
+        "status": status,
+        "summary": (summary or "")[:500],
+    }
+    try:
+        _runs_log.parent.mkdir(parents=True, exist_ok=True)
+        with open(_runs_log, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception as exc:
+        _log.warning("cron run log failed: %s", exc)
+
+
+def _execute_job(job: CronJob) -> None:
+    """Run a single job's task by sending its description through the agent."""
+    try:
+        from . import agent  # local import — avoid circular at module load
+        session_id = f"cron-{job.id}"
+        result = agent.chat(session_id, job.description or job.name)
+        reply = result.get("reply", "") if isinstance(result, dict) else str(result)
+        _log_run(job, "success", reply)
+    except Exception as exc:
+        _log_run(job, "error", f"{type(exc).__name__}: {exc}")
+
+
+def _scheduler_loop() -> None:
+    """Every 30s, check whether any job is due this minute. Fire matches in fresh threads."""
+    last_fired_minute: Optional[str] = None
+    while not _stop_event.is_set():
+        now = _dt.now()
+        minute_key = now.strftime("%Y-%m-%d %H:%M")
+        if minute_key != last_fired_minute:
+            last_fired_minute = minute_key
+            for job in _read_jobs():
+                if not job.enabled:
+                    continue
+                if _job_due(job.schedule, now):
+                    _log.info("Firing cron job %s (%s)", job.name, job.id)
+                    _threading.Thread(target=_execute_job, args=(job,), daemon=True).start()
+        _stop_event.wait(30)
+
+
+def start_scheduler() -> None:
+    """Start the background scheduler. Safe to call multiple times (idempotent)."""
+    global _scheduler_thread
+    if _scheduler_thread and _scheduler_thread.is_alive():
+        return
+    _stop_event.clear()
+    _scheduler_thread = _threading.Thread(target=_scheduler_loop, daemon=True, name="cron-scheduler")
+    _scheduler_thread.start()
+    _log.info("In-process cron scheduler started")
+
+
+def stop_scheduler() -> None:
+    """Signal the scheduler loop to exit."""
+    _stop_event.set()

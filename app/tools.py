@@ -987,6 +987,33 @@ def list_cron_jobs() -> dict:
     return {"jobs": jobs, "count": len(jobs)}
 
 
+def _resolve_cron_job_id(name_or_id: str) -> Optional[str]:
+    """Find a job id by exact id match first, then by name. Returns None if not found."""
+    name_or_id = (name_or_id or "").strip()
+    if not name_or_id:
+        return None
+    for job in cronjobs.list_jobs():
+        if job.get("id") == name_or_id or job.get("name") == name_or_id:
+            return job.get("id")
+    return None
+
+
+def delete_cron_job(name_or_id: str) -> dict:
+    """删除已创建的定时任务。可以传 name 或 id。"""
+    job_id = _resolve_cron_job_id(name_or_id)
+    if not job_id:
+        return {"ok": False, "error": f"找不到定时任务：{name_or_id}"}
+    return cronjobs.remove_job(job_id)
+
+
+def toggle_cron_job(name_or_id: str, enabled: bool) -> dict:
+    """启用或停用一个定时任务。enabled=true 启用，false 停用。"""
+    job_id = _resolve_cron_job_id(name_or_id)
+    if not job_id:
+        return {"ok": False, "error": f"找不到定时任务：{name_or_id}"}
+    return cronjobs.set_enabled(job_id, bool(enabled))
+
+
 def list_outputs() -> dict:
     files = [p.name for p in settings.output_dir.iterdir() if p.is_file()]
     return {"files": sorted(files, reverse=True)[:50]}
@@ -1005,7 +1032,7 @@ def fetch_webpage(url: str, max_chars: int = 12000) -> dict:
             "Accept": "text/html,text/plain,application/xhtml+xml",
         },
     )
-    with urlopen(request, timeout=15) as response:
+    with urlopen(request, timeout=8) as response:
         raw = response.read(1_000_000)
         content_type = response.headers.get("content-type", "")
     text = raw.decode(_charset_from_content_type(content_type), errors="replace")
@@ -1021,56 +1048,9 @@ def fetch_webpage(url: str, max_chars: int = 12000) -> dict:
 
 
 def search_web(query: str, max_results: int = 5) -> dict:
-    """Search the public web and return result titles/snippets/URLs."""
-    query = (query or "").strip()
-    if not query:
-        return {"error": "empty search query"}
-    max_results = min(max(int(max_results or 5), 1), 10)
-    search_url = f"https://duckduckgo.com/html/?q={quote_plus(query)}"
-    request = Request(
-        search_url,
-        headers={
-            "User-Agent": "AuctusAgent/0.1 (+local personal assistant)",
-            "Accept": "text/html",
-        },
-    )
-    with urlopen(request, timeout=15) as response:
-        raw = response.read(1_000_000)
-        content_type = response.headers.get("content-type", "")
-    html = raw.decode(_charset_from_content_type(content_type), errors="replace")
-    results = _parse_duckduckgo_results(html, max_results)
-    return {"query": query, "results": results, "count": len(results)}
-
-
-def _parse_duckduckgo_results(html: str, max_results: int) -> list[dict[str, str]]:
-    results: list[dict[str, str]] = []
-    pattern = re.compile(
-        r'<a[^>]+class="result__a"[^>]+href="(?P<href>[^"]+)"[^>]*>(?P<title>.*?)</a>',
-        re.I | re.S,
-    )
-    for match in pattern.finditer(html):
-        href = unescape(match.group("href"))
-        title = _html_to_text(match.group("title"))
-        url = _clean_duckduckgo_url(href)
-        if not title or not url:
-            continue
-        snippet = ""
-        tail = html[match.end():match.end() + 1500]
-        snippet_match = re.search(r'<a[^>]+class="result__snippet"[^>]*>(.*?)</a>', tail, re.I | re.S)
-        if snippet_match:
-            snippet = _html_to_text(snippet_match.group(1))
-        results.append({"title": title, "url": url, "snippet": snippet})
-        if len(results) >= max_results:
-            break
-    return results
-
-
-def _clean_duckduckgo_url(href: str) -> str:
-    parsed = urlparse(href)
-    if parsed.netloc.endswith("duckduckgo.com"):
-        target = parse_qs(parsed.query).get("uddg", [""])[0]
-        return unquote(target)
-    return href
+    """Search the public web. Uses DuckDuckGo by default; if a Tavily or Brave API key is configured in settings, uses that for higher-quality agent-optimized results. Returns titles/snippets/URLs."""
+    from . import search_providers
+    return search_providers.search(query, max_results)
 
 
 def _charset_from_content_type(content_type: str) -> str:
@@ -1302,6 +1282,7 @@ _RISK = {
     "list_memories": "low",
     "confirm_memory": "medium",
     "forget_memory": "high",
+    "run_parallel_subagents": "low",
 }
 
 def _validate_tool_args(name: str, args: dict) -> Optional[str]:
@@ -1577,6 +1558,73 @@ def configure_feishu(app_id: str = "", app_secret: str = "", verification_token:
     if verification_token:
         msg += " Verification Token 已保存，主要用于 Webhook 备用模式。"
     return {"ok": True, "app_id": app_id, "receive_mode": receive_mode, "domain": domain, "message": msg}
+
+
+def configure_discord(bot_token: str = "", allowed_user_ids: str = "", confirmed: bool = False) -> dict:
+    """配置 Discord Bot。验证 token，保存到 .env，并立即起 bot 线程。"""
+    import urllib.request, json as _json
+    from .config import settings as _settings
+    from pathlib import Path as _Path
+
+    if not confirmed:
+        return {"error": "需要用户确认。请在参数中加入 confirmed: true。"}
+
+    token = (bot_token or "").strip()
+    if not token:
+        return {"error": "需要提供 bot_token。请告知用户去 https://discord.com/developers/applications 新建 application → Bot → Reset Token。"}
+
+    # Verify the token by calling Discord's /users/@me
+    try:
+        req = urllib.request.Request(
+            "https://discord.com/api/v10/users/@me",
+            headers={"Authorization": f"Bot {token}", "User-Agent": "AuctusAgent (configure, 1.0)"},
+        )
+        with urllib.request.urlopen(req, timeout=8) as r:
+            info = _json.loads(r.read())
+    except Exception as exc:
+        return {"error": f"Token 验证失败：{type(exc).__name__}: {exc}。请检查 bot token 是否正确，且 application 已勾选 MESSAGE CONTENT INTENT。"}
+
+    bot_username = info.get("username", "")
+    bot_id = info.get("id", "")
+    if not bot_id:
+        return {"error": "Token 看起来有效，但 Discord 没返回 bot id。"}
+
+    ids_str = (allowed_user_ids or "").strip()
+    env_path = _Path(".env")
+    try:
+        from dotenv import set_key as _set_key
+        env_path.touch()
+        _set_key(str(env_path), "DISCORD_BOT_TOKEN", token)
+        if ids_str:
+            _set_key(str(env_path), "DISCORD_ALLOWED_USER_IDS", ids_str)
+    except Exception as exc:
+        return {"error": f"写入 .env 失败：{exc}"}
+
+    _settings.discord_bot_token = token
+    if ids_str:
+        _settings.discord_allowed_user_ids = ids_str
+
+    # Start (or restart) the bot thread now that the token is in place
+    try:
+        from . import discord_bot as _dc_bot
+        _dc_bot.run_in_thread()
+    except Exception as exc:
+        return {"error": f"Discord 配置已保存，但启动 bot 失败：{type(exc).__name__}: {exc}"}
+
+    invite_url = (
+        f"https://discord.com/api/oauth2/authorize?client_id={bot_id}"
+        "&permissions=2147568640&scope=bot"
+    )
+    return {
+        "ok": True,
+        "bot_username": bot_username,
+        "bot_id": bot_id,
+        "invite_url": invite_url,
+        "message": (
+            f"Discord bot ({bot_username}) 已配置成功。点这个链接把它拉进你的服务器或 DM 它："
+            f"{invite_url}"
+        ),
+    }
 
 
 # ---------- 工具 schema（喂给 LLM）----------
@@ -2184,16 +2232,45 @@ TOOL_SCHEMAS: list[dict] = [
         "type": "function",
         "function": {
             "name": "create_cron_job",
-            "description": "创建定时任务。生成可执行脚本并注册到 Auctus Agent cron 管理器。用户说每天/每周/定时执行某个任务时使用。创建成功后简单告知用户定时任务已设置好，不要提及技术细节（crontab、命令行等）。",
+            "description": "创建定时任务。用户说每天/每周/某点钟执行某事时使用。**你必须自己把自然语言时间表达转成标准 5 段 cron 表达式**：'每天早上 8 点' → '0 8 * * *'；'每周一 9 点' → '0 9 * * 1'；'每月 1 号' → '0 0 1 * *'；'每小时' → '0 * * * *'。Auctus Agent 内置 scheduler 会按时直接在 app 内执行任务（不需要用户管 crontab）。创建成功后简单告知用户任务已设好，不要提技术细节。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "name": {"type": "string", "description": "任务名称，简短易读，如 daily-report"},
-                    "schedule": {"type": "string", "description": "cron 表达式，如 '0 9 * * *' 表示每天早上9点"},
-                    "task": {"type": "string", "description": "任务描述，作为 agent.py run 的 --task 参数"},
+                    "schedule": {"type": "string", "description": "标准 5 段 cron 表达式：分 时 日 月 周。例如 '0 9 * * *' 每天 9 点；'30 18 * * 5' 每周五 18:30。"},
+                    "task": {"type": "string", "description": "任务描述（用户自然语言原话即可），到时间会作为 user message 发给 agent 执行"},
                     "input_file": {"type": "string", "description": "可选，inputs/ 下的文件名，如 data.md。有文件时 agent 会读取该文件执行任务"},
                 },
                 "required": ["name", "schedule", "task"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_cron_job",
+            "description": "删除已创建的定时任务。可以按 name 或 id 删除。用户说'取消/删除定时任务 xxx'时调用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name_or_id": {"type": "string", "description": "任务名称或 id"},
+                },
+                "required": ["name_or_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "toggle_cron_job",
+            "description": "启用或停用一个定时任务（不删除）。停用后到点不会执行。用户说'暂停 xxx 任务'或'恢复 xxx 任务'时调用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name_or_id": {"type": "string", "description": "任务名称或 id"},
+                    "enabled": {"type": "boolean", "description": "true 启用 / false 停用"},
+                },
+                "required": ["name_or_id", "enabled"],
             },
         },
     },
@@ -2295,7 +2372,227 @@ TOOL_SCHEMAS: list[dict] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "configure_discord",
+            "description": "在对话中配置 Discord Bot。用户说【连接/配置/绑定 Discord】时调用。先去 https://discord.com/developers/applications 新建 application → Bot → Reset Token，并务必勾选 MESSAGE CONTENT INTENT。然后把 token 给到这个工具，会自动验证、写入 .env、起 bot 线程，并返回邀请链接让用户把 bot 加进自己的服务器或 DM。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "bot_token": {"type": "string", "description": "Discord Bot Token（从 Developer Portal 复制）"},
+                    "allowed_user_ids": {"type": "string", "description": "可选，逗号分隔的 Discord 用户 ID 白名单；留空表示允许任何 DM 这个 bot 的用户使用"},
+                    "confirmed": {"type": "boolean", "description": "必须传 true 才会保存配置"},
+                },
+                "required": ["bot_token", "confirmed"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_open",
+            "description": "在内置后台无头浏览器中打开 URL，会完整执行 JavaScript。仅适合 fetch_webpage 无法读取、登录、SPA、需要点击/输入的动态页面；普通搜索和静态网页优先用 search_web/fetch_webpage。打开后页面会保持在内存，可继续 browser_read/click/type/screenshot。首次使用会下载 ~150MB 的 Chromium（一次性）。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "完整 URL，含 http:// 或 https://"},
+                    "wait_for": {"type": "string", "description": "等待事件：domcontentloaded (默认，更快) / load / networkidle。除非必须等待长连接完成，否则不要用 networkidle。"},
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_read",
+            "description": "读取当前浏览器页面的可见文本。selector 为空时返回整页 innerText；指定 CSS selector 时只返回该元素的文本。需要先调 browser_open。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "selector": {"type": "string", "description": "可选 CSS 选择器，例如 '.price' 或 '#main'"},
+                    "max_chars": {"type": "integer", "description": "返回文本上限，默认 8000，最大 30000"},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_click",
+            "description": "点击当前页面上匹配 CSS selector 的第一个元素。常用于'下一页'按钮、登录提交、菜单展开。需要先调 browser_open。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "selector": {"type": "string", "description": "CSS 选择器，例如 'button[type=submit]'"},
+                    "timeout_ms": {"type": "integer", "description": "等待元素出现的毫秒数，默认 5000"},
+                },
+                "required": ["selector"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_type",
+            "description": "在 input/textarea 等输入框里填入文本。submit=true 时填完后按 Enter 提交。需要先调 browser_open。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "selector": {"type": "string", "description": "CSS 选择器定位输入框"},
+                    "text": {"type": "string", "description": "要输入的文本"},
+                    "submit": {"type": "boolean", "description": "是否按 Enter 提交，默认 false"},
+                },
+                "required": ["selector", "text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_screenshot",
+            "description": "把当前浏览器页面截图保存为 PNG 到 outputs/。返回保存路径。需要先调 browser_open。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filename": {"type": "string", "description": "可选文件名（不含路径），默认 screenshot.png"},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_close",
+            "description": "关闭当前浏览器会话，释放 Chromium 占用的内存。完成网页任务后建议调一次。",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_wait",
+            "description": "等待页面上某个元素出现或消失，再继续后续操作。处理 SPA / 登录回跳 / AJAX 渲染必备。state: visible (默认，可见且可点击) / attached (DOM 里存在但可能隐藏) / hidden / detached。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "selector": {"type": "string", "description": "CSS 选择器"},
+                    "timeout_ms": {"type": "integer", "description": "最长等待毫秒，默认 10000"},
+                    "state": {"type": "string", "description": "visible / attached / hidden / detached，默认 visible"},
+                },
+                "required": ["selector"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_back",
+            "description": "浏览器后退一页（等同于点浏览器后退按钮）。需要先调 browser_open。",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_forward",
+            "description": "浏览器前进一页。需要先调 browser_open。",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_scroll",
+            "description": "滚动当前页面。direction: down (默认) / up / top / bottom。长页面读完整内容前必须滚动。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "direction": {"type": "string", "description": "down / up / top / bottom"},
+                    "pixels": {"type": "integer", "description": "滚动像素数，仅 up/down 生效，默认 600"},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_evaluate",
+            "description": "在当前页面跑一段 JavaScript 并返回结果。用于精准提取 (querySelectorAll 取值)、获取页面元数据 (document.title) 或读取 localStorage 等。脚本必须是表达式或箭头函数。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "script": {"type": "string", "description": "JS 表达式或箭头函数，如 '() => document.title'"},
+                },
+                "required": ["script"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_image",
+            "description": "根据文字描述生成图片（OpenAI gpt-image-1 模型），自动保存为 PNG 到 outputs/ 目录。用户说'画一张/生成图片/给我做个图'时调用。需要在设置里配置 OPENAI_API_KEY。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string", "description": "详细描述要生成什么样的图。越具体效果越好（构图、风格、颜色、光线等）。"},
+                    "size": {"type": "string", "description": "尺寸：1024x1024 (默认正方形) / 1024x1536 (竖版) / 1536x1024 (横版) / auto"},
+                    "quality": {"type": "string", "description": "质量：low / medium / high / auto (默认 auto)。high 慢且贵。"},
+                },
+                "required": ["prompt"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "text_to_speech",
+            "description": "把文本转成语音音频（OpenAI tts-1），保存为 mp3 到 outputs/。用户说'读出来/朗读/语音播报/转成音频'时调用。单次最多 4000 字，长文要拆开多次调。需要在设置里配置 OPENAI_API_KEY。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "要朗读的文字内容"},
+                    "voice": {"type": "string", "description": "音色：alloy (默认中性) / echo (男低) / fable (英国男) / onyx (深沉) / nova (女) / shimmer (柔和女)"},
+                    "fmt": {"type": "string", "description": "输出格式：mp3 (默认) / opus / aac / flac / wav"},
+                    "speed": {"type": "number", "description": "语速倍率，0.25–4.0，默认 1.0"},
+                },
+                "required": ["text"],
+            },
+        },
+    },
 ]
+
+TOOL_SCHEMAS.append({
+    "type": "function",
+    "function": {
+        "name": "run_parallel_subagents",
+        "description": "并行运行最多 3 个独立研究子任务，并把结果汇总回来。适合比较多个公司/商品/保险/来源；子任务必须相互独立。不要用于简单问题。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "tasks": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "1-3 个相互独立的子任务，每个子任务应具体、可单独完成。",
+                },
+                "expected_output": {
+                    "type": "string",
+                    "description": "希望每个子任务返回的格式，例如“价格、来源、优点、风险”。",
+                },
+                "timeout_seconds": {
+                    "type": "integer",
+                    "description": "总超时秒数，默认 60，最大 90。",
+                },
+            },
+            "required": ["tasks"],
+        },
+    },
+})
 
 # 从 schema 提取 required 参数，用于前置校验
 _TOOL_REQUIRED_PARAMS: dict[str, set[str]] = {}
@@ -2303,6 +2600,112 @@ for _sch in TOOL_SCHEMAS:
     _func = _sch.get("function", {})
     _params = _func.get("parameters", {})
     _TOOL_REQUIRED_PARAMS[_func["name"]] = set(_params.get("required", []))
+
+
+_BASE_TOOL_NAMES = {
+    "read_file",
+    "write_file",
+    "analyze_image",
+    "summarize_text",
+    "make_markdown_report",
+    "make_spreadsheet",
+    "make_webpage",
+    "make_react_prototype",
+    "list_outputs",
+    "recall",
+    "list_memories",
+}
+_RESEARCH_TOOL_NAMES = {
+    "search_web",
+    "fetch_webpage",
+    "fetch_element",
+    "track_logistics",
+    "browser_open",
+    "browser_read",
+    "browser_click",
+    "browser_type",
+    "browser_screenshot",
+    "browser_close",
+    "browser_wait",
+    "browser_back",
+    "browser_forward",
+    "browser_scroll",
+    "browser_evaluate",
+}
+_TERMINAL_TOOL_NAMES = {
+    "run_terminal_command",
+    "terminal_session_start",
+    "terminal_session_list",
+    "terminal_session_tail",
+    "terminal_session_send",
+    "terminal_session_stop",
+}
+_EMAIL_TOOL_NAMES = {
+    "summarize_email_text",
+    "extract_email_tasks",
+    "draft_email_reply",
+    "list_inbox",
+    "search_emails",
+    "get_email_thread",
+    "configure_email_account",
+    "list_email_accounts_tool",
+    "send_email_tool",
+    "delete_email_tool",
+    "archive_email_tool",
+}
+_MEMORY_TOOL_NAMES = {"extract_memory_candidates", "remember", "confirm_memory", "forget_memory"}
+_SCHEDULE_TOOL_NAMES = {"create_cron_job", "list_cron_jobs", "delete_cron_job", "toggle_cron_job"}
+_MEDIA_TOOL_NAMES = {"generate_image", "text_to_speech"}
+_SUBAGENT_TOOL_NAMES = {"run_parallel_subagents"}
+_INTEGRATION_TOOL_NAMES = {
+    "configure_iot_gateway",
+    "call_iot_gateway",
+    "get_integration_status",
+    "configure_telegram",
+    "configure_feishu",
+    "configure_discord",
+}
+_SCHEMA_BY_NAME = {_sch["function"]["name"]: _sch for _sch in TOOL_SCHEMAS}
+
+
+def tool_schemas_for(user_text: str, extra_system_context: str | None = None) -> list[dict]:
+    """Return a smaller tool set for the current task.
+
+    Exposing every tool on every turn makes function selection noisier as the
+    product grows. This router keeps common safe tools available and adds
+    domain-specific tools from lightweight intent signals and Task Mode plan
+    context.
+    """
+    text = f"{user_text or ''}\n{extra_system_context or ''}".lower()
+    names = set(_BASE_TOOL_NAMES)
+
+    if _has_any(text, ("search", "browse", "web", "website", "url", "price", "quote", "insurance", "travel", "news", "latest", "stock", "source", "research", "compare", "购买", "买", "报价", "保险", "旅行", "新闻", "最新", "库存", "来源", "搜索", "网页", "对比", "research_comparison")):
+        names |= _RESEARCH_TOOL_NAMES
+        if "[subagent]" not in text and _has_any(text, ("compare", "research", "multiple", "several", "各", "多个", "几家", "比较", "对比", "分别", "research_comparison")):
+            names |= _SUBAGENT_TOOL_NAMES
+    if _has_any(text, ("terminal", "command", "shell", "run ", "execute", "test", "build", "server", "python", "npm", "git", "代码", "命令", "终端", "运行", "执行", "测试", "构建", "启动", "technical")):
+        names |= _TERMINAL_TOOL_NAMES
+    if _has_any(text, ("email", "mail", "inbox", "imap", "smtp", "reply", "邮件", "邮箱", "收件箱", "回复邮件")):
+        names |= _EMAIL_TOOL_NAMES
+    if _has_any(text, ("remember", "memory", "forget", "记住", "记忆", "忘记")):
+        names |= _MEMORY_TOOL_NAMES
+    if _has_any(text, ("cron", "schedule", "every day", "weekly", "remind", "定时", "计划任务", "提醒", "每天", "每周")):
+        names |= _SCHEDULE_TOOL_NAMES
+    if _has_any(text, ("image", "picture", "draw", "generate image", "tts", "speech", "audio", "voice", "图片", "画", "生成图", "语音", "朗读", "音频", "creation")):
+        names |= _MEDIA_TOOL_NAMES
+    if _has_any(text, ("telegram", "feishu", "lark", "discord", "iot", "home assistant", "飞书", "机器人", "集成", "智能家居")):
+        names |= _INTEGRATION_TOOL_NAMES
+
+    ordered = [_SCHEMA_BY_NAME[name] for name in _schema_order() if name in names and name in _SCHEMA_BY_NAME]
+    return ordered or TOOL_SCHEMAS
+
+
+def _schema_order() -> list[str]:
+    return [_sch["function"]["name"] for _sch in TOOL_SCHEMAS]
+
+
+def _has_any(text: str, signals: tuple[str, ...]) -> bool:
+    return any(signal in text for signal in signals)
 
 
 _DISPATCH = {
@@ -2344,12 +2747,74 @@ _DISPATCH = {
     "forget_memory": forget_memory,
     "create_cron_job": create_cron_job,
     "list_cron_jobs": list_cron_jobs,
+    "delete_cron_job": delete_cron_job,
+    "toggle_cron_job": toggle_cron_job,
     "configure_iot_gateway": configure_iot_gateway,
     "call_iot_gateway": call_iot_gateway,
     "get_integration_status": get_integration_status,
     "configure_telegram": configure_telegram,
     "configure_feishu": configure_feishu,
+    "configure_discord": configure_discord,
+    "browser_open": lambda url, wait_for="load": _browser_call("browser_open", url=url, wait_for=wait_for),
+    "browser_read": lambda selector="", max_chars=8000: _browser_call("browser_read", selector=selector, max_chars=max_chars),
+    "browser_click": lambda selector, timeout_ms=5000: _browser_call("browser_click", selector=selector, timeout_ms=timeout_ms),
+    "browser_type": lambda selector, text, submit=False: _browser_call("browser_type", selector=selector, text=text, submit=submit),
+    "browser_screenshot": lambda filename="": _browser_call("browser_screenshot", filename=filename),
+    "browser_close": lambda: _browser_call("browser_close"),
+    "browser_wait": lambda selector, timeout_ms=10000, state="visible": _browser_call("browser_wait", selector=selector, timeout_ms=timeout_ms, state=state),
+    "browser_back": lambda: _browser_call("browser_back"),
+    "browser_forward": lambda: _browser_call("browser_forward"),
+    "browser_scroll": lambda direction="down", pixels=600: _browser_call("browser_scroll", direction=direction, pixels=pixels),
+    "browser_evaluate": lambda script: _browser_call("browser_evaluate", script=script),
+    "generate_image": lambda prompt, size="1024x1024", quality="auto": _image_call("generate_image", prompt=prompt, size=size, quality=quality),
+    "text_to_speech": lambda text, voice="", fmt="mp3", speed=1.0: _tts_call("text_to_speech", text=text, voice=voice, fmt=fmt, speed=speed),
+    "run_parallel_subagents": lambda tasks, expected_output="", timeout_seconds=60: _subagent_call(tasks=tasks, expected_output=expected_output, timeout_seconds=timeout_seconds),
 }
+
+
+def _image_call(fn_name: str, **kwargs) -> dict:
+    """Lazy bridge to tools_image (defers heavy import until first call)."""
+    try:
+        from . import tools_image
+    except Exception as exc:
+        return {"error": f"image module unavailable: {type(exc).__name__}: {exc}"}
+    fn = getattr(tools_image, fn_name, None)
+    if fn is None:
+        return {"error": f"unknown image tool: {fn_name}"}
+    return fn(**kwargs)
+
+
+def _tts_call(fn_name: str, **kwargs) -> dict:
+    """Lazy bridge to tools_tts."""
+    try:
+        from . import tools_tts
+    except Exception as exc:
+        return {"error": f"tts module unavailable: {type(exc).__name__}: {exc}"}
+    fn = getattr(tools_tts, fn_name, None)
+    if fn is None:
+        return {"error": f"unknown tts tool: {fn_name}"}
+    return fn(**kwargs)
+
+
+def _subagent_call(**kwargs) -> dict:
+    """Lazy bridge to subagent runner."""
+    try:
+        from . import subagent
+    except Exception as exc:
+        return {"error": f"subagent module unavailable: {type(exc).__name__}: {exc}"}
+    return subagent.run_parallel_subagents(**kwargs)
+
+
+def _browser_call(fn_name: str, **kwargs) -> dict:
+    """Lazy bridge to tools_browser — avoids importing Playwright until first browser tool is used."""
+    try:
+        from . import tools_browser
+    except Exception as exc:
+        return {"error": f"browser module unavailable: {type(exc).__name__}: {exc}"}
+    fn = getattr(tools_browser, fn_name, None)
+    if fn is None:
+        return {"error": f"unknown browser tool: {fn_name}"}
+    return fn(**kwargs)
 
 
 def run_tool(

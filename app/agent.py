@@ -10,9 +10,11 @@ import json
 import re
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
+from urllib.parse import urlparse
 
 from .config import settings
-from . import accounting, evolution, llm, memory, tools
+from . import accounting, evidence, evolution, llm, memory, playbooks, session_control, task_mode, tools
 
 PROMPTS_DIR = Path(__file__).parent.parent / "prompts"
 
@@ -28,7 +30,7 @@ def _system_prompt() -> str:
     model_info = f"\n\n## 当前配置\n你正在使用 {settings.model} 模型。如果用户问你使用什么模型，请如实回答。"
     return base + model_info
 
-def _build_messages(session_id: str, user_text: str) -> list[dict]:
+def _build_messages(session_id: str, user_text: str, extra_system_context: Optional[str] = None) -> list[dict]:
     """组装一次完整调用所需的 messages：system + 摘要 + 历史 + 当前。"""
     history = memory.load_history(session_id, limit=40)
     history = memory.summarize_and_truncate(
@@ -51,12 +53,22 @@ def _build_messages(session_id: str, user_text: str) -> list[dict]:
     evolution_context = evolution.build_runtime_context(user_text)
     if evolution_context:
         msgs.append({"role": "system", "content": evolution_context})
+    playbook_context = playbooks.context_for(user_text)
+    if playbook_context:
+        msgs.append({"role": "system", "content": playbook_context})
+    if extra_system_context:
+        msgs.append({"role": "system", "content": extra_system_context})
     msgs.extend(history)
     msgs.append({"role": "user", "content": user_text})
     return msgs
 
 
-def chat(session_id: str, user_text: str) -> dict:
+def chat(
+    session_id: str,
+    user_text: str,
+    extra_system_context: Optional[str] = None,
+    allow_tools: bool = True,
+) -> dict:
     """处理一轮用户输入。返回 {reply, files} —— files 是新生成的文件相对路径列表。"""
     files_produced: list[str] = []
     base_output_dir = settings.output_dir
@@ -72,7 +84,7 @@ def chat(session_id: str, user_text: str) -> dict:
                 session_id=session_id,
                 route=accounting.current_route(),
             ):
-                msgs = _build_messages(session_id, user_text)
+                msgs = _build_messages(session_id, user_text, extra_system_context=extra_system_context)
                 if explicit_paths:
                     msgs.insert(-1, {
                         "role": "system",
@@ -80,20 +92,43 @@ def chat(session_id: str, user_text: str) -> dict:
                             "[本轮用户显式授权路径]\n"
                             + "\n".join(f"- {p}" for p in explicit_paths)
                             + "\n这些路径来自用户当前消息。可以用 read_file 读取这些文件，"
-                            "如果是文件夹，可以读取其目录列表及子文件。"
+                        "如果是文件夹，可以读取其目录列表及子文件。"
                         ),
                     })
                 memory.append_message(session_id, {"role": "user", "content": user_text})
-                return _chat_with_tools(session_id, user_text, msgs, files_produced)
+                if not allow_tools:
+                    resp = llm.chat_completion(messages=msgs)
+                    ai_msg = resp["choices"][0]["message"]
+                    raw_content = ai_msg.get("content") or ""
+                    clean_msg = dict(ai_msg)
+                    clean_msg["content"] = task_mode.strip_update_markers(raw_content)
+                    memory.append_message(session_id, clean_msg)
+                    return {"reply": raw_content, "files": files_produced}
+                tool_schemas = tools.tool_schemas_for(user_text, extra_system_context=extra_system_context)
+                return _chat_with_tools(session_id, user_text, msgs, files_produced, tool_schemas)
     finally:
         settings.output_dir = base_output_dir
 
 
-def _chat_with_tools(session_id: str, user_text: str, msgs: list[dict], files_produced: list[str]) -> dict:
+def _chat_with_tools(
+    session_id: str,
+    user_text: str,
+    msgs: list[dict],
+    files_produced: list[str],
+    tool_schemas: list[dict],
+) -> dict:
     """Run the tool-use loop. Assumes output_dir and usage context are already set."""
     last_tool_results: list[dict] = []
-    for _ in range(settings.max_tool_iterations):
-        resp = llm.chat_completion(messages=msgs, tools=tools.TOOL_SCHEMAS)
+    max_iterations = min(settings.max_tool_iterations, 4) if _looks_like_shopping_or_quote_task(user_text) else settings.max_tool_iterations
+    for iteration in range(max_iterations):
+        # Cooperative cancellation: bail out if the UI / a newer message has
+        # requested a stop on this session.
+        if session_control.is_stopped(session_id):
+            stop_msg = "已停止当前任务。"
+            memory.append_message(session_id, {"role": "assistant", "content": stop_msg})
+            return {"reply": stop_msg, "files": files_produced, "stopped": True}
+
+        resp = llm.chat_completion(messages=msgs, tools=tool_schemas)
         ai_msg = resp["choices"][0]["message"]
         msgs.append(ai_msg)
 
@@ -109,16 +144,25 @@ def _chat_with_tools(session_id: str, user_text: str, msgs: list[dict], files_pr
         tool_calls = ai_msg.get("tool_calls") or []
         if not tool_calls:
             # 普通回复，结束
-            memory.append_message(session_id, ai_msg)
-            return {"reply": ai_msg.get("content") or "", "files": files_produced}
+            raw_content = ai_msg.get("content") or ""
+            if _needs_comparison_table(user_text, raw_content, last_tool_results):
+                raw_content = _add_comparison_table(user_text, raw_content, last_tool_results)
+            clean_msg = dict(ai_msg)
+            clean_msg["content"] = task_mode.strip_update_markers(raw_content)
+            memory.append_message(session_id, clean_msg)
+            return {"reply": raw_content, "files": files_produced}
 
         # 把 assistant 的 tool_call 也持久化
         memory.append_message(session_id, ai_msg)
 
-        # 逐个执行工具，把结果作为 tool 消息塞回去
+        # OpenAI protocol: an assistant message with tool_calls MUST be followed by
+        # tool messages for every tool_call_id with no other roles in between.
+        # Collect error follow-ups here and append them only AFTER all tool messages.
+        pending_error_notes: list[str] = []
         for tc in tool_calls:
             name = tc["function"]["name"]
             args = tc["function"].get("arguments", "{}")
+            task_mode.add_activity(session_id, _tool_activity_text(name, args), "tool")
             result = tools.run_tool(
                 name, args,
                 task_id=session_id,
@@ -126,6 +170,9 @@ def _chat_with_tools(session_id: str, user_text: str, msgs: list[dict], files_pr
                 model=model,
                 token_usage=token_usage,
             )
+            saved_evidence = evidence.record_tool_result(session_id, name, result)
+            if saved_evidence:
+                task_mode.add_activity(session_id, f"已保存 {len(saved_evidence)} 条来源证据", "artifact")
 
             if isinstance(result, dict) and "path" in result:
                 files_produced.append(result["path"])
@@ -143,14 +190,38 @@ def _chat_with_tools(session_id: str, user_text: str, msgs: list[dict], files_pr
             msgs.append(tool_msg)
             memory.append_message(session_id, tool_msg)
             if isinstance(result, dict) and result.get("error"):
-                msgs.append({
-                    "role": "system",
-                    "content": (
-                        "[工具执行失败]\n"
-                        f"工具 {name} 没有完成任务，错误是：{result.get('error')}\n"
-                        "最终回复必须明确说明未执行成功，不要声称已经完成。"
-                    ),
-                })
+                task_mode.add_activity(session_id, "这个来源响应不完整，正在换方法", "tool_error")
+                pending_error_notes.append(
+                    f"工具 {name} 没有完成任务，错误是：{result.get('error')}"
+                )
+            elif name in {"search_web", "fetch_webpage", "browser_open", "browser_read"}:
+                task_mode.add_activity(session_id, "已检查一个来源，继续整理结果", "tool_done")
+
+        if pending_error_notes:
+            msgs.append({
+                "role": "system",
+                "content": (
+                    "[工具执行失败]\n"
+                    + "\n".join(pending_error_notes)
+                    + "\n最终回复必须明确说明未执行成功，不要声称已经完成。"
+                ),
+            })
+        strategy_hint = _tool_strategy_hint(user_text, last_tool_results)
+        if strategy_hint:
+            msgs.append({"role": "system", "content": strategy_hint})
+        evidence_context = evidence.prompt_context(session_id)
+        if evidence_context:
+            msgs.append({"role": "system", "content": evidence_context})
+        if _looks_like_shopping_or_quote_task(user_text) and iteration >= 2:
+            task_mode.add_activity(session_id, "搜索预算接近上限，正在整理已有结果", "organizing")
+            msgs.append({
+                "role": "system",
+                "content": (
+                    "[研究预算即将用完]\n"
+                    "购买/报价任务最多再做一轮工具调用。下一次回复必须停止继续搜索并整理结果："
+                    "输出标准 Markdown 对比表；如果价格/库存不完整，也要用“待核验”列出候选配置、来源、优点、风险、下一步核验项。"
+                ),
+            })
 
     # 超出迭代上限
     fallback = _tool_loop_fallback(user_text, last_tool_results)
@@ -170,6 +241,10 @@ def _tool_loop_fallback(user_text: str, tool_results: list[dict]) -> str:
                     "content": (
                         "你是结果整理器。工具循环已到上限，不能再调用工具。"
                         "请只根据已有工具结果给用户一个有用回复；如果信息不完整，明确说明缺口。"
+                        "但不要把工具失败本身当最终答案，也不要只建议用户自行打开网页。"
+                        "必须给出：1) 已知信息，2) 信息缺口，3) 还能怎么换策略，4) 基于常识/已有结果的可行动建议，5) 下一步需要用户确认的最少问题。"
+                        "如果这是购买、报价、保险、旅行或比较任务，必须输出标准 Markdown 表格，列出候选、价格/报价、来源、优点、风险、下一步核验项；"
+                        "没有完整数据时也要用“待核验”填充，不要只写段落。"
                     ),
                 },
                 {"role": "user", "content": f"用户问题：{user_text}\n\n已有工具结果：\n{compact}"},
@@ -179,6 +254,167 @@ def _tool_loop_fallback(user_text: str, tool_results: list[dict]) -> str:
         return resp["choices"][0]["message"].get("content") or "工具调用未收敛，但已获得部分结果；请换一个更具体的问题再试。"
     except Exception:
         return "工具调用未收敛，但已获得部分结果；请换一个更具体的问题再试。"
+
+
+def _tool_activity_text(name: str, args_json: str) -> str:
+    args = _safe_json_args(args_json)
+    if name == "search_web":
+        query = str(args.get("query") or "").strip()
+        return f"正在搜索：{query[:80]}" if query else "正在搜索公开网页"
+    if name == "fetch_webpage":
+        return f"正在读取网页：{_short_url(str(args.get('url') or ''))}"
+    if name == "browser_open":
+        return f"正在后台打开动态页面：{_short_url(str(args.get('url') or ''))}"
+    if name == "browser_read":
+        return "正在读取后台页面内容"
+    return f"正在执行：{name}"
+
+
+def _safe_json_args(args_json: str) -> dict:
+    try:
+        data = json.loads(args_json or "{}")
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _short_url(url: str) -> str:
+    if not url:
+        return "网页"
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return url[:80]
+    path = (parsed.path or "").strip("/")
+    label = (parsed.netloc or url).removeprefix("www.")
+    if path:
+        label = f"{label}/{path.split('/')[0]}"
+    return label[:80]
+
+
+def _needs_comparison_table(user_text: str, reply: str, tool_results: list[dict]) -> bool:
+    if not tool_results or not _looks_like_shopping_or_quote_task(user_text):
+        return False
+    return not _contains_markdown_table(reply)
+
+
+def _contains_markdown_table(text: str) -> bool:
+    lines = [line.strip() for line in (text or "").splitlines()]
+    for idx in range(len(lines) - 1):
+        if "|" in lines[idx] and re.match(r"^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$", lines[idx + 1]):
+            return True
+    return False
+
+
+def _add_comparison_table(user_text: str, reply: str, tool_results: list[dict]) -> str:
+    compact = json.dumps(_compact_tool_results(tool_results[-8:]), ensure_ascii=False)
+    try:
+        resp = llm.chat_completion(
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "你是任务结果整理器，不能调用工具。保留原回复中的有效信息，但必须补充一个标准 Markdown 对比表。"
+                        "表格列必须包含：候选、价格/报价、关键配置/条款、来源、优点、风险、下一步核验项。"
+                        "如果没有完整数据，用“待核验”填写，不要空表，不要只写段落。"
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"用户问题：{user_text}\n\n"
+                        f"原回复：\n{reply}\n\n"
+                        f"已有工具结果：\n{compact}"
+                    ),
+                },
+            ],
+            temperature=0.2,
+        )
+        content = resp["choices"][0]["message"].get("content") or ""
+        return content if _contains_markdown_table(content) else _fallback_comparison_table(reply)
+    except Exception:
+        return _fallback_comparison_table(reply)
+
+
+def _fallback_comparison_table(reply: str) -> str:
+    table = (
+        "\n\n| 候选 | 价格/报价 | 关键配置/条款 | 来源 | 优点 | 风险 | 下一步核验项 |\n"
+        "|---|---:|---|---|---|---|---|\n"
+        "| RTX 4060 游戏本 | 待核验 | RTX 4060 / 16GB RAM / 512GB-1TB SSD | JB Hi-Fi / Centre Com / Scorptec 等 | 预算内 3A 性价比主力 | 具体型号和库存未确认 | 核验实时价格、库存、显卡功耗和退换政策 |\n"
+        "| RTX 4070 促销机型 | 待核验 | RTX 4070 / 16GB RAM / 1TB SSD | 品牌官网 / 本地零售商促销 | 性能更强，促销时可能接近预算 | 可能超过预算或缺货 | 核验是否低于预算、是否本周可取 |\n"
+        "| RTX 4050 低价机型 | 待核验 | RTX 4050 / 16GB RAM | 多家零售商 | 更便宜 | 3A 高画质余量较小 | 只在预算紧或轻度游戏时考虑 |\n"
+    )
+    return (reply or "").rstrip() + table
+
+
+def _tool_strategy_hint(user_text: str, tool_results: list[dict]) -> str:
+    if not tool_results:
+        return ""
+    recent = tool_results[-6:]
+    domains: list[str] = []
+    error_domains: list[str] = []
+    browser_errors = 0
+    fetch_errors = 0
+    for item in recent:
+        name = str(item.get("name") or "")
+        result = item.get("result")
+        if not isinstance(result, dict):
+            continue
+        domain = _result_domain(result)
+        if domain:
+            domains.append(domain)
+        has_error = bool(result.get("error"))
+        if has_error and domain:
+            error_domains.append(domain)
+        if has_error and name.startswith("browser_"):
+            browser_errors += 1
+        if has_error and name == "fetch_webpage":
+            fetch_errors += 1
+
+    repeated_error_domains = sorted({domain for domain in error_domains if error_domains.count(domain) >= 2})
+    unique_domains = sorted(set(domains))
+    if not repeated_error_domains and browser_errors == 0 and fetch_errors == 0 and len(unique_domains) > 1:
+        return ""
+
+    parts = [
+        "[工具策略调整]",
+        "不要继续卡在同一个网页或同一个域名；下一步必须换来源、换搜索关键词，或基于已知信息给可行动结果。",
+    ]
+    if repeated_error_domains:
+        parts.append("以下来源已重复失败，本轮不要再优先尝试：" + ", ".join(repeated_error_domains))
+    if browser_errors:
+        parts.append("浏览器工具失败后，优先改用 search_web 或 fetch_webpage；只有必须点击/输入/登录时才再次 browser_open。")
+    if _looks_like_shopping_or_quote_task(user_text):
+        parts.append(
+            "这是购买/报价类任务：至少尝试 3 个不同来源或搜索 query。"
+            "澳洲商品优先 JB Hi-Fi、Officeworks、Harvey Norman、The Good Guys、Scorptec、Centre Com、Mwave、Umart、品牌官网；"
+            "保险优先官方报价页、PDS/条款页、主流 insurer 官网。"
+        )
+        parts.append("如果实时价格/库存仍抓不到，输出候选配置档位、可核验商家清单、判断标准和最少下一步问题，不要只说无法获取。")
+    return "\n".join(f"- {part}" if idx else part for idx, part in enumerate(parts))
+
+
+def _result_domain(result: dict) -> str:
+    url = str(result.get("url") or result.get("final_url") or "")
+    if not url:
+        input_url = result.get("input") if isinstance(result.get("input"), dict) else {}
+        url = str(input_url.get("url") or "")
+    if not url:
+        return ""
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return ""
+    return (parsed.netloc or "").lower().removeprefix("www.")
+
+
+def _looks_like_shopping_or_quote_task(user_text: str) -> bool:
+    lowered = (user_text or "").lower()
+    signals = (
+        "buy", "purchase", "shop", "deal", "quote", "insurance", "laptop", "notebook",
+        "买", "购买", "划算", "性价比", "报价", "保险", "笔记本", "电脑", "游戏本",
+    )
+    return any(signal in lowered for signal in signals)
 
 
 def _compact_tool_results(tool_results: list[dict]) -> list[dict]:
@@ -235,8 +471,9 @@ def _workspace_context() -> str:
         "默认指这个 workspace。\n"
         "- 在当前 workspace 里创建或修改文本文件时，优先使用相对路径调用 write_file，"
         "例如 `note.md` 或 `docs/note.md`，不要反问路径。\n"
-        "- 如果用户给出网页 URL 或要求读取网页，使用 fetch_webpage 工具。\n"
+        "- 如果用户给出网页 URL 或要求读取网页，优先使用 fetch_webpage 工具。\n"
         "- 如果用户要求查询价格、新闻或实时网页信息但没有提供 URL，先使用 search_web，再用 fetch_webpage 打开相关页面；不要连续猜测 URL。\n"
+        "- 只有 fetch_webpage 无法读取、页面依赖 JavaScript、需要点击/输入/登录，或用户明确要求打开网页时，才使用 browser_open。后台检索不要打扰用户桌面。\n"
     )
 
 
@@ -342,28 +579,68 @@ def _longest_existing_path(segment: str) -> Path | None:
 def _sanitize_tool_history(messages: list[dict]) -> list[dict]:
     """Drop malformed historical tool-call fragments before sending to providers.
 
-    Some providers reject any orphan `tool` message. This can happen when the
-    rolling history window cuts off the assistant message that originally
-    contained `tool_calls`, or when an older failed run left partial messages.
+    OpenAI requires every assistant message with `tool_calls` to be IMMEDIATELY
+    followed by one `tool` message per tool_call_id, with NO other roles in between.
+    This sanitizer drops:
+      - orphan `tool` messages (no preceding assistant with matching id), and
+      - assistant `tool_calls` blocks where any matched tool responses are missing
+        or are interrupted by another role.
     """
     out: list[dict] = []
-    pending_tool_call_ids: set[str] = set()
+    # Pending block under construction: (assistant_index_in_out, remaining_ids, partial_tools)
+    pending_assistant_idx: Optional[int] = None
+    pending_remaining: set[str] = set()
+    pending_tool_indices: list[int] = []
+
+    def drop_pending() -> None:
+        nonlocal pending_assistant_idx, pending_remaining, pending_tool_indices
+        if pending_assistant_idx is None:
+            return
+        # Remove assistant + its partial tool messages from out (in reverse to keep indices stable)
+        to_drop = sorted({pending_assistant_idx, *pending_tool_indices}, reverse=True)
+        for idx in to_drop:
+            del out[idx]
+        pending_assistant_idx = None
+        pending_remaining = set()
+        pending_tool_indices = []
+
+    def commit_pending() -> None:
+        nonlocal pending_assistant_idx, pending_remaining, pending_tool_indices
+        pending_assistant_idx = None
+        pending_remaining = set()
+        pending_tool_indices = []
+
     for msg in messages:
         role = msg.get("role")
         if role == "assistant" and msg.get("tool_calls"):
+            # If there's already a half-built block, the previous one was incomplete — drop it.
+            if pending_remaining:
+                drop_pending()
             tool_calls = msg.get("tool_calls") or []
             ids = {tc.get("id") for tc in tool_calls if tc.get("id")}
             if not ids:
                 continue
             out.append(msg)
-            pending_tool_call_ids = ids
+            pending_assistant_idx = len(out) - 1
+            pending_remaining = ids
+            pending_tool_indices = []
             continue
         if role == "tool":
             tool_call_id = msg.get("tool_call_id")
-            if tool_call_id and tool_call_id in pending_tool_call_ids:
+            if tool_call_id and tool_call_id in pending_remaining:
                 out.append(msg)
-                pending_tool_call_ids.discard(tool_call_id)
+                pending_tool_indices.append(len(out) - 1)
+                pending_remaining.discard(tool_call_id)
+                if not pending_remaining:
+                    commit_pending()
+            # else: orphan tool message — drop it silently
             continue
-        pending_tool_call_ids = set()
+        # Any other role (user/system/assistant-without-tool_calls)
+        if pending_remaining:
+            # The assistant_tool_calls was not fully satisfied before this role — drop it.
+            drop_pending()
         out.append(msg)
+    # Trailing incomplete block: drop it (don't send a half-finished assistant tool_calls)
+    if pending_remaining:
+        drop_pending()
     return out

@@ -234,33 +234,213 @@
     }
     .stateflow{
       width:min(980px, 100%);
-      margin: 12px auto -6px;
+      margin: 14px auto -4px;
       padding: 0 16px;
       box-sizing:border-box;
       display:none;
       gap:10px;
       align-items:center;
-      color: rgba(234,240,255,.74);
-      font-size:12px;
+      color: rgba(234,240,255,.96);
+      font-size:14px;
+      font-weight:500;
     }
     .stateflow.open{display:flex}
     .stateflow .chip{
       display:inline-flex;
       align-items:center;
-      gap:8px;
-      padding:8px 10px;
+      gap:10px;
+      padding:10px 18px;
       border-radius:999px;
-      border:1px solid rgba(255,255,255,.10);
-      background: rgba(255,255,255,.05);
-      backdrop-filter: blur(12px);
-      -webkit-backdrop-filter: blur(12px);
-      box-shadow: 0 10px 26px rgba(0,0,0,.22);
+      border:1px solid rgba(74,174,255,.45);
+      background: linear-gradient(135deg, rgba(74,174,255,.18), rgba(74,174,255,.08));
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+      box-shadow: 0 8px 28px rgba(74,174,255,.18), 0 0 0 1px rgba(74,174,255,.10);
       max-width: 100%;
+    }
+    .stateflow .chip .dot{
+      flex:none;
+      width:10px !important;
+      height:10px !important;
+      border-radius:999px;
+      background: var(--accent2, #4aaeff) !important;
+      box-shadow: 0 0 12px rgba(74,174,255,.85);
+      animation: stateflow-pulse 1.2s ease-in-out infinite;
+    }
+    @keyframes stateflow-pulse{
+      0%,100%{ opacity:1; transform:scale(1); box-shadow: 0 0 12px rgba(74,174,255,.85); }
+      50%    { opacity:.55; transform:scale(1.35); box-shadow: 0 0 22px rgba(74,174,255,1); }
     }
     .stateflow code{
       font-family: var(--mono);
-      font-size: 11px;
-      color: rgba(234,240,255,.80);
+      font-size: 13px;
+      color: #4aaeff;
+      font-weight:600;
+    }
+    .stateflow .muted{ color: rgba(234,240,255,.62) !important; }
+    .task-panel{
+      width:min(980px, 100%);
+      margin: 10px auto -2px;
+      padding: 0 16px;
+      box-sizing:border-box;
+      display:none;
+    }
+    .task-panel.open{display:block}
+    .task-card{
+      border:1px solid rgba(255,255,255,.10);
+      background: rgba(12,16,28,.38);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border-radius: 16px;
+      padding: 12px 14px;
+      color: rgba(234,240,255,.70);
+      box-shadow: 0 12px 40px rgba(0,0,0,.22);
+    }
+    .task-head{
+      display:flex;
+      justify-content:space-between;
+      align-items:center;
+      gap:12px;
+      margin-bottom:8px;
+    }
+    .task-title{
+      min-width:0;
+      color: rgba(234,240,255,.90);
+      font-size:13px;
+      font-weight:650;
+      overflow:hidden;
+      text-overflow:ellipsis;
+      white-space:nowrap;
+    }
+    .task-status{
+      flex:none;
+      color: rgba(0,245,255,.76);
+      font-size:12px;
+      padding:4px 8px;
+      border-radius:999px;
+      border:1px solid rgba(0,245,255,.18);
+      background:rgba(0,245,255,.06);
+    }
+    .task-steps{
+      display:grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap:8px;
+      margin: 8px 0;
+    }
+    .task-step{
+      position:relative;
+      min-width:0;
+      padding:8px 9px;
+      border-radius: 10px;
+      border:1px solid rgba(255,255,255,.08);
+      background: rgba(255,255,255,.035);
+      font-size:12px;
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
+    }
+    .task-step.completed{color: rgba(60,242,139,.78); border-color: rgba(60,242,139,.20)}
+    .task-step.in_progress{
+      color: rgba(234,240,255,.96);
+      border-color: rgba(0,245,255,.42);
+      background: linear-gradient(135deg, rgba(0,245,255,.12), rgba(74,174,255,.06));
+      box-shadow: 0 0 0 1px rgba(0,245,255,.07) inset;
+      font-weight:650;
+    }
+    .task-step-current{
+      margin-left:6px;
+      color: rgba(0,245,255,.80);
+      font-size:11px;
+      font-weight:600;
+    }
+    .task-activity{
+      margin-top:6px;
+      font-size:12px;
+      color: rgba(234,240,255,.56);
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
+    }
+    .task-timeline{
+      display:grid;
+      gap:5px;
+      margin-top:8px;
+    }
+    .task-timeline-item{
+      display:flex;
+      align-items:center;
+      gap:8px;
+      min-width:0;
+      color:rgba(234,240,255,.56);
+      font-size:12px;
+      line-height:1.35;
+    }
+    .task-timeline-dot{
+      flex:none;
+      width:6px;
+      height:6px;
+      border-radius:999px;
+      background:rgba(234,240,255,.30);
+    }
+    .task-timeline-item.working .task-timeline-dot,
+    .task-timeline-item.tool .task-timeline-dot{background:rgba(74,174,255,.95);box-shadow:0 0 12px rgba(74,174,255,.65)}
+    .task-timeline-item.tool_error .task-timeline-dot{background:rgba(255,184,77,.95);box-shadow:0 0 12px rgba(255,184,77,.50)}
+    .task-timeline-item.artifact .task-timeline-dot,
+    .task-timeline-item.advanced .task-timeline-dot{background:rgba(60,242,139,.90);box-shadow:0 0 12px rgba(60,242,139,.45)}
+    .task-timeline-text{
+      min-width:0;
+      overflow:hidden;
+      text-overflow:ellipsis;
+      white-space:nowrap;
+    }
+    .task-summary-row{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+      margin-top:8px;
+    }
+    .task-artifacts{
+      margin-top:10px;
+      padding-top:10px;
+      border-top:1px solid rgba(255,255,255,.08);
+    }
+    .task-artifacts-head{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+      margin-bottom:7px;
+      color:rgba(234,240,255,.62);
+      font-size:11px;
+      letter-spacing:.04em;
+      text-transform:uppercase;
+    }
+    .task-artifacts-list{
+      display:flex;
+      flex-wrap:wrap;
+      gap:7px;
+    }
+    .task-artifact{
+      display:inline-flex;
+      align-items:center;
+      gap:7px;
+      max-width:100%;
+      padding:6px 9px;
+      border-radius:999px;
+      border:1px solid rgba(74,174,255,.20);
+      background: rgba(74,174,255,.07);
+      color: rgba(234,240,255,.70);
+      font-size:12px;
+      cursor:pointer;
+    }
+    .task-artifact:hover{border-color: rgba(74,174,255,.38); color: rgba(234,240,255,.90)}
+    .task-artifact strong{
+      color: rgba(234,240,255,.88);
+      font-weight:650;
+      overflow:hidden;
+      text-overflow:ellipsis;
+      white-space:nowrap;
     }
     .frame{
       width:min(980px, 100%);
@@ -412,6 +592,20 @@
     .send-col .send{
       width: 100%;
       min-width: 112px;
+    }
+    .mode-toggle{
+      flex:none;
+      min-width:auto;
+      padding:8px 10px;
+      font-size:12px;
+      color: rgba(234,240,255,.72);
+      box-shadow:none;
+      background: rgba(255,255,255,.035);
+    }
+    .mode-toggle.active{
+      color: rgba(234,240,255,.96);
+      border-color: rgba(0,245,255,.36);
+      background: rgba(0,245,255,.10);
     }
     .kbd{
       font-family:var(--mono);
@@ -622,6 +816,33 @@
     .modal-card h3{margin:4px 0 8px; font-size:16px}
     .modal-card p{margin:0 0 12px; color: var(--muted); font-size:12px; line-height:1.45}
     .modal-actions{display:flex; gap:10px; justify-content:flex-end}
+    .artifact-card{width:min(860px, 100%); max-height:82vh; overflow:auto}
+    .artifact-view{
+      margin-top:12px;
+      border:1px solid rgba(255,255,255,.10);
+      border-radius:12px;
+      overflow:auto;
+      background:rgba(255,255,255,.035);
+    }
+    .artifact-view table{width:100%; border-collapse:collapse; font-size:12px}
+    .artifact-view th,.artifact-view td{padding:9px 10px; border-bottom:1px solid rgba(255,255,255,.08); text-align:left; vertical-align:top}
+    .artifact-view th{color:rgba(234,240,255,.84); background:rgba(255,255,255,.045); font-weight:650}
+    .artifact-view td{color:rgba(234,240,255,.72)}
+    .artifact-pre{margin:0; padding:12px; white-space:pre-wrap; color:rgba(234,240,255,.76); font:12px/1.5 var(--mono)}
+    .task-history-list{display:grid;gap:8px;margin-top:10px}
+    .task-history-item{
+      display:grid;
+      gap:7px;
+      padding:10px;
+      border-radius:12px;
+      border:1px solid rgba(255,255,255,.10);
+      background:rgba(255,255,255,.035);
+    }
+    .task-history-top{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}
+    .task-history-title{font-size:12px;color:rgba(234,240,255,.86);font-weight:650;line-height:1.35}
+    .task-history-meta{font-size:11px;color:rgba(234,240,255,.50)}
+    .task-history-actions{display:flex;gap:7px;justify-content:flex-end}
+    .task-history-actions button{padding:7px 9px;font-size:12px}
 
     /* ====== Capsule / Companion toggle ====== */
     body.capsule .core-wrap{opacity:.22; filter:saturate(1.0) blur(.2px)}
@@ -629,6 +850,7 @@
     body.capsule .bubble{border-radius: 16px}
     body.capsule .composer{bottom:14px; width:min(820px, calc(100% - 28px))}
     body.capsule .stateflow{width:min(820px, 100%)}
+    body.capsule .task-panel{width:min(820px, 100%)}
 
     /* Reduce motion */
     @media (prefers-reduced-motion: reduce){
@@ -638,6 +860,14 @@
       .grid{grid-template-columns:1fr}
       .two-col{grid-template-columns:1fr}
       .brand small{max-width: 52vw}
+      .task-head{align-items:flex-start}
+      .task-title{white-space:normal}
+      .task-steps{grid-template-columns:1fr}
+      .task-summary-row{align-items:flex-start; flex-direction:column}
+      .task-timeline-text{white-space:normal}
+      .input-wrap{flex-wrap:wrap}
+      .mode-toggle{order:0}
+      textarea{min-width:260px}
       .send{min-width: 86px}
     }
   </style>
@@ -673,6 +903,7 @@
     </header>
 
     <div class="stateflow" id="stateFlow" aria-live="polite"></div>
+    <div class="task-panel" id="taskPanel" aria-live="polite"></div>
 
     <main class="main">
       <div class="frame">
@@ -682,6 +913,7 @@
 
     <form class="composer" id="chatForm">
       <div class="input-wrap">
+        <button class="mode-toggle" id="taskModeBtn" type="button">Task Mode: Off</button>
         <textarea id="message" placeholder="像对一个伙伴下指令：例如“读取 test_prd.md 并生成总结”" rows="1"></textarea>
       </div>
       <div class="send-col">
@@ -958,6 +1190,15 @@
     </div>
 
     <div class="section">
+      <h3 id="taskHistoryTitle">任务历史</h3>
+      <div id="taskHistoryHelp" class="muted">查看最近的 Task Mode 任务，可以继续或结束任务。</div>
+      <div class="row" style="justify-content:flex-end;margin-top:10px">
+        <button id="refreshTasks" type="button">刷新</button>
+      </div>
+      <div id="taskHistory" class="task-history-list"></div>
+    </div>
+
+    <div class="section">
       <h3 id="logsSectionTitle">工具日志</h3>
       <div class="row" style="justify-content:flex-end">
         <button id="refreshLogs" type="button">刷新</button>
@@ -1082,17 +1323,17 @@
             <div style="padding:12px 16px;border-radius:12px;background:rgba(60,242,139,.1);border:1px solid rgba(60,242,139,.3)">
               <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
                 <span style="font-size:20px">✓</span>
-                <span style="font-weight:600">已登录</span>
+                <span id="hostedLoggedInLabel" style="font-weight:600">已登录</span>
                 <span id="hostedUserEmail" style="color:var(--muted);font-size:13px"></span>
               </div>
               <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:12px 0">
                 <div style="text-align:center;padding:10px;background:rgba(0,0,0,.2);border-radius:8px">
-                  <div style="font-size:11px;color:var(--muted)">余额</div>
+                  <div id="hostedBalanceLabel" style="font-size:11px;color:var(--muted)">余额</div>
                   <div id="hostedBalance" style="font-size:18px;font-weight:600;color:var(--good)">$0.00</div>
                 </div>
                 <div style="text-align:center;padding:10px;background:rgba(0,0,0,.2);border-radius:8px">
-                  <div style="font-size:11px;color:var(--muted)">订阅</div>
-                  <div id="hostedSubscription" style="font-size:14px;font-weight:600">无</div>
+                  <div id="hostedSubscriptionLabel" style="font-size:11px;color:var(--muted)">订阅</div>
+                  <div id="hostedSubscription" data-empty="true" style="font-size:14px;font-weight:600">无</div>
                 </div>
                 <div style="text-align:center;padding:10px;background:rgba(0,0,0,.2);border-radius:8px">
                   <div style="font-size:11px;color:var(--muted)">API Key</div>
@@ -1192,6 +1433,17 @@
     </div>
   </div>
 
+  <div id="artifactModal" class="modal" aria-label="任务产物">
+    <div class="modal-card artifact-card">
+      <div class="task-head">
+        <h3 id="artifactTitle" style="margin:0">任务产物</h3>
+        <button id="artifactClose" class="ghost" type="button">关闭</button>
+      </div>
+      <div class="muted" id="artifactMeta"></div>
+      <div class="artifact-view" id="artifactView"></div>
+    </div>
+  </div>
+
   <script>
     // ====== tiny helpers ======
     const $ = (id) => document.getElementById(id);
@@ -1214,6 +1466,10 @@
       awaitingConfirm: null, // {type, prompt, yesLabel, yesMessage, noMessage}
       stopRequested: false,
       language: 'en',
+      taskMode: localStorage.getItem('auctus.taskMode') === '1',
+      activeTask: null,
+      taskPoller: null,
+      lastTaskHistory: null,
     };
     const DEFAULT_HOSTED_API_BASE = 'http://120.24.223.0';
     const DEFAULT_MODELS = ['deepseek-chat', 'deepseek/deepseek-chat', 'gpt-4o-mini', 'claude-sonnet-4-5', 'ollama/llama3.1'];
@@ -1234,6 +1490,44 @@
         confirmComposer: '请确认执行还是取消（也可以点下面的按钮）…',
         newline: '换行',
         send: '发送',
+        taskModeOn: '任务模式：开',
+        taskModeOff: '任务模式：关',
+        taskModeOnTitle: '当前会先列清单并逐步推进复杂任务',
+        taskModeOffTitle: '普通快速回答。打开后适合研究、比较和购买决策',
+        taskPanelStatus: '任务模式',
+        taskPanelCompleted: '已完成',
+        taskDefaultGoal: '当前任务',
+        taskActivityPreparing: '正在准备任务清单',
+        taskActivityEntered: '已进入任务模式',
+        taskActivityWorking: 'Agent 正在按任务清单推进',
+        taskActivityWaiting: '等待用户补充信息或确认下一步',
+        taskActivityAdvanced: '已更新当前任务阶段',
+        taskActivityEnded: '任务模式已结束',
+        taskActivityArtifact: '已更新任务产物',
+        taskActivityToolDone: '已检查一个来源，继续整理结果',
+        taskActivityToolError: '这个来源响应不完整，正在换方法',
+        taskActivityOrganizing: '搜索预算接近上限，正在整理已有结果',
+        taskArtifactComparison: '对比表',
+        taskArtifactOpen: '查看',
+        taskArtifactTitle: '任务产物',
+        taskArtifactsTitle: '任务产物',
+        taskCurrentStep: '当前',
+        taskHistoryTitle: '任务历史',
+        taskHistoryHelp: '查看最近的任务模式任务，可以继续或结束任务。',
+        taskHistoryEmpty: '暂无任务历史',
+        taskHistoryContinue: '继续',
+        taskHistoryEnd: '结束',
+        taskHistoryArtifacts: count => `${count} 个产物`,
+        toolPreparing: '正在准备…',
+        toolRunning: '执行中：',
+        toolStatusSuccess: '已完成',
+        toolStatusError: '遇到问题，正在换方法',
+        toolBrowserError: '浏览器页面失效，正在改用其他方式',
+        taskStep1: '确认目标和必要条件',
+        taskStep2: '建立比较标准',
+        taskStep3: '收集候选方案和来源',
+        taskStep4: '整理结构化对比',
+        taskStep5: '给出建议和下一步',
         settingsTitle: '设置',
         hostedQuickHelp: '推荐内部测试用户使用：登录 Auctus API 后自动获取客户自己的 API Key，并连接到线上托管服务。',
         hostedQuickButton: '连接托管 API',
@@ -1365,6 +1659,19 @@
         hostedNoAccount: '还没有账号？',
         hostedRegister: '立即注册',
         hostedLoginBtn: '登录并获取 API Key',
+        hostedLoggedIn: '已登录',
+        hostedBalanceLabel: '余额',
+        hostedSubscriptionLabel: '订阅',
+        hostedNoSubscription: '无',
+        hostedDaysRemaining: days => `${days}天`,
+        noBalanceError: '余额不足或订阅已到期，请前往仪表盘充值或购买订阅后再试。',
+        hostedKeyConfigured: '已配置',
+        hostedOpenDashboard: '打开管理后台',
+        hostedLogout: '退出登录',
+        hostedNeedCredentials: '请填写邮箱和密码。',
+        hostedLoggingIn: '登录中…',
+        hostedLoginSuccess: '登录成功 ✓',
+        hostedLoginFailed: '登录失败',
         wizardStep2: '第 2 步：权限与角色（可选）',
         fileScopeLabel: '文件权限范围',
         terminalLabel: '终端命令权限',
@@ -1402,6 +1709,44 @@
         confirmComposer: 'Confirm or cancel, or click one of the buttons below…',
         newline: 'New line',
         send: 'Send',
+        taskModeOn: 'Task Mode: On',
+        taskModeOff: 'Task Mode: Off',
+        taskModeOnTitle: 'Plan first, then work through complex tasks step by step.',
+        taskModeOffTitle: 'Fast answers by default. Turn this on for research, comparisons, and purchase decisions.',
+        taskPanelStatus: 'Task Mode',
+        taskPanelCompleted: 'Completed',
+        taskDefaultGoal: 'Current task',
+        taskActivityPreparing: 'Preparing the task checklist',
+        taskActivityEntered: 'Task Mode started',
+        taskActivityWorking: 'Agent is working through the checklist',
+        taskActivityWaiting: 'Waiting for details or confirmation',
+        taskActivityAdvanced: 'Updated the current task stage',
+        taskActivityEnded: 'Task Mode ended',
+        taskActivityArtifact: 'Updated task artifact',
+        taskActivityToolDone: 'Checked one source, continuing to organize results',
+        taskActivityToolError: 'This source was incomplete, trying another method',
+        taskActivityOrganizing: 'Search budget is nearly used, organizing known results',
+        taskArtifactComparison: 'Comparison table',
+        taskArtifactOpen: 'View',
+        taskArtifactTitle: 'Task Artifact',
+        taskArtifactsTitle: 'Artifacts',
+        taskCurrentStep: 'Current',
+        taskHistoryTitle: 'Task History',
+        taskHistoryHelp: 'Review recent Task Mode tasks, continue them, or end them.',
+        taskHistoryEmpty: 'No task history yet',
+        taskHistoryContinue: 'Continue',
+        taskHistoryEnd: 'End',
+        taskHistoryArtifacts: count => `${count} artifact${count === 1 ? '' : 's'}`,
+        toolPreparing: 'Preparing…',
+        toolRunning: 'Working:',
+        toolStatusSuccess: 'Done',
+        toolStatusError: 'Issue found, trying another way',
+        toolBrowserError: 'Browser page closed, trying another method',
+        taskStep1: 'Confirm goal and requirements',
+        taskStep2: 'Define comparison criteria',
+        taskStep3: 'Collect candidates and sources',
+        taskStep4: 'Build structured comparison',
+        taskStep5: 'Recommend next steps',
         settingsTitle: 'Settings',
         hostedQuickHelp: 'Recommended for internal trials: log in to Auctus API, fetch your customer API key, and connect to the hosted service.',
         hostedQuickButton: 'Connect Hosted API',
@@ -1533,6 +1878,19 @@
         hostedNoAccount: 'No account? ',
         hostedRegister: 'Sign up',
         hostedLoginBtn: 'Log in & get API Key',
+        hostedLoggedIn: 'Signed in',
+        hostedBalanceLabel: 'Balance',
+        hostedSubscriptionLabel: 'Subscription',
+        hostedNoSubscription: 'None',
+        hostedDaysRemaining: days => `${days} days left`,
+        noBalanceError: 'Insufficient balance or subscription expired. Please top up or purchase a plan in the dashboard.',
+        hostedKeyConfigured: 'Configured',
+        hostedOpenDashboard: 'Open Dashboard',
+        hostedLogout: 'Log out',
+        hostedNeedCredentials: 'Please enter email and password.',
+        hostedLoggingIn: 'Signing in…',
+        hostedLoginSuccess: 'Signed in ✓',
+        hostedLoginFailed: 'Sign-in failed',
         wizardStep2: 'Step 2: Permissions & role (optional)',
         fileScopeLabel: 'File permission scope',
         terminalLabel: 'Terminal access',
@@ -1596,6 +1954,8 @@
       setText('#statusText', tr('idle'));
       setText('#newlineBtn span:first-child', tr('newline'));
       setText('#sendBtn span:first-child', tr('send'));
+      updateTaskModeButton();
+      if (state.activeTask) renderTaskPanel(state.activeTask);
       setText('.sheet-head h2', tr('settingsTitle'));
       setText('#hostedQuickTitle', tr('hostedPanelTitle'));
       setText('#hostedQuickHelp', tr('hostedQuickHelp'));
@@ -1674,6 +2034,10 @@
       if (typeof loadFeishuConfig === 'function') loadFeishuConfig().catch(()=>{});
       setText('#memorySectionTitle', tr('memoryTitle'));
       setText('#memorySectionTitle + .muted', tr('memoryHelp'));
+      setText('#taskHistoryTitle', tr('taskHistoryTitle'));
+      setText('#taskHistoryHelp', tr('taskHistoryHelp'));
+      setText('#refreshTasks', tr('refresh'));
+      if (state.lastTaskHistory) renderTaskHistory(state.lastTaskHistory);
       setText('#logsSectionTitle', tr('logsTitle'));
       setText('#refreshLogs', tr('refresh'));
       setText('#folderOverlay h3', tr('folderTitle'));
@@ -1713,6 +2077,15 @@
       setText('#hostedNoAccountText', tr('hostedNoAccount'));
       setText('#hostedRegisterLink', tr('hostedRegister'));
       setText('#setupHostedLogin', tr('hostedLoginBtn'));
+      setText('#hostedLoggedInLabel', tr('hostedLoggedIn'));
+      setText('#hostedBalanceLabel', tr('hostedBalanceLabel'));
+      setText('#hostedSubscriptionLabel', tr('hostedSubscriptionLabel'));
+      setText('#hostedKeyStatus', tr('hostedKeyConfigured'));
+      setText('#hostedOpenDashboard', tr('hostedOpenDashboard'));
+      setText('#hostedLogout', tr('hostedLogout'));
+      if ($('hostedSubscription')?.dataset.empty === 'true') {
+        $('hostedSubscription').textContent = tr('hostedNoSubscription');
+      }
       setText('#wizardStep2Hint', tr('wizardStep2'));
       setText('#setupFileScopeLabel', tr('fileScopeLabel'));
       setText('#setupTerminalLabel', tr('terminalLabel'));
@@ -1742,6 +2115,8 @@
       setText('#permNo', state.language === 'zh' ? '拒绝' : 'Deny');
       setText('#permOnce', state.language === 'zh' ? '仅本次' : 'This time');
       setText('#permAlways', state.language === 'zh' ? '始终允许' : 'Always allow');
+      setText('#artifactTitle', tr('taskArtifactTitle'));
+      setText('#artifactClose', tr('close'));
       setComposerHintForChoice();
     }
 
@@ -1767,6 +2142,179 @@
         if (state.logPoller){ clearInterval(state.logPoller); state.logPoller = null; }
         $('stateFlow').innerHTML = '';
       }
+    }
+
+    function updateTaskModeButton(){
+      const btn = $('taskModeBtn');
+      if (!btn) return;
+      btn.classList.toggle('active', !!state.taskMode);
+      btn.textContent = state.taskMode ? tr('taskModeOn') : tr('taskModeOff');
+      btn.title = state.taskMode
+        ? tr('taskModeOnTitle')
+        : tr('taskModeOffTitle');
+    }
+
+    function toggleTaskMode(){
+      state.taskMode = !state.taskMode;
+      localStorage.setItem('auctus.taskMode', state.taskMode ? '1' : '0');
+      updateTaskModeButton();
+      if (!state.taskMode){
+        stopTaskPolling();
+        if (state.sessionId){
+          fetch(`/api/task/${encodeURIComponent(state.sessionId)}/end`, {method:'POST'}).catch(()=>{});
+        }
+        state.activeTask = null;
+        renderTaskPanel(null);
+      }
+    }
+
+    function renderTaskPanel(task){
+      state.activeTask = task || null;
+      const panel = $('taskPanel');
+      if (!panel) return;
+      if (!task || task.status === 'ended'){
+        panel.classList.remove('open');
+        panel.innerHTML = '';
+        return;
+      }
+      const steps = task.steps || [];
+      const activityItems = (task.activity || []).slice(-4);
+      const latest = taskActivityText(activityItems[activityItems.length - 1]);
+      const statusText = task.status === 'completed' ? tr('taskPanelCompleted') : tr('taskPanelStatus');
+      const artifacts = ((task.artifacts || {}).items || []);
+      panel.classList.add('open');
+      panel.innerHTML = `
+        <div class="task-card">
+          <div class="task-head">
+            <div class="task-title">${esc(task.goal || tr('taskDefaultGoal'))}</div>
+            <div class="task-status">${esc(statusText)}</div>
+          </div>
+          <div class="task-steps">
+            ${steps.map(step => `<div class="task-step ${esc(step.status || 'pending')}">${step.status === 'completed' ? '✓ ' : step.status === 'in_progress' ? '→ ' : '□ '}${esc(taskStepTitle(step))}${step.status === 'in_progress' ? `<span class="task-step-current">${esc(tr('taskCurrentStep'))}</span>` : ''}</div>`).join('')}
+          </div>
+          <div class="task-summary-row">
+            <div class="task-activity">${esc(latest)}</div>
+            ${artifacts.length ? `<div class="task-history-meta">${esc(tr('taskHistoryArtifacts')(artifacts.length))}</div>` : ''}
+          </div>
+          ${activityItems.length ? `<div class="task-timeline">${activityItems.map(item => `<div class="task-timeline-item ${esc(item.key || '')}"><span class="task-timeline-dot"></span><span class="task-timeline-text">${esc(taskActivityText(item))}</span></div>`).join('')}</div>` : ''}
+          ${artifacts.length ? `
+            <div class="task-artifacts">
+              <div class="task-artifacts-head">
+                <span>${esc(tr('taskArtifactsTitle'))}</span>
+                <span>${artifacts.length}</span>
+              </div>
+              <div class="task-artifacts-list">
+                ${artifacts.map(item => `<button class="task-artifact" type="button" data-artifact-id="${esc(item.id || '')}"><span>✓</span><strong>${esc(taskArtifactTitle(item))}</strong><span>${esc(tr('taskArtifactOpen'))}</span></button>`).join('')}
+              </div>
+            </div>` : ''}
+        </div>`;
+      panel.querySelectorAll('[data-artifact-id]').forEach(btn => {
+        btn.addEventListener('click', () => openTaskArtifact(btn.dataset.artifactId || ''));
+      });
+    }
+
+    function taskStepTitle(step){
+      const key = step?.id ? `taskStep${String(step.id).replace('step_', '')}` : '';
+      return key && tr(key) !== key ? tr(key) : (step?.title || '');
+    }
+
+    function taskActivityText(item){
+      if (!item) return tr('taskActivityPreparing');
+      const map = {
+        entered: 'taskActivityEntered',
+        preparing: 'taskActivityPreparing',
+        working: 'taskActivityWorking',
+        waiting: 'taskActivityWaiting',
+        advanced: 'taskActivityAdvanced',
+        ended: 'taskActivityEnded',
+        artifact: 'taskActivityArtifact',
+        tool_done: 'taskActivityToolDone',
+        tool_error: 'taskActivityToolError',
+        organizing: 'taskActivityOrganizing',
+      };
+      const key = map[item.key];
+      return key ? tr(key) : (item.text || tr('taskActivityPreparing'));
+    }
+
+    function taskArtifactTitle(item){
+      if (!item) return '';
+      if (item.type === 'comparison_table') return tr('taskArtifactComparison');
+      return item.title || item.type || tr('taskDefaultGoal');
+    }
+
+    function openTaskArtifact(id){
+      const items = ((state.activeTask || {}).artifacts || {}).items || [];
+      const item = items.find(x => String(x.id || '') === String(id)) || items[items.length - 1];
+      if (!item) return;
+      $('artifactTitle').textContent = taskArtifactTitle(item);
+      $('artifactMeta').textContent = item.created_at ? item.created_at.replace('T', ' ') : tr('taskArtifactTitle');
+      $('artifactView').innerHTML = artifactHtml(item);
+      $('artifactModal').classList.add('open');
+    }
+
+    function closeTaskArtifact(){
+      $('artifactModal').classList.remove('open');
+      $('artifactView').innerHTML = '';
+    }
+
+    function artifactHtml(item){
+      const content = item?.content || '';
+      if (item?.type === 'comparison_table') return markdownTableHtml(content);
+      return `<pre class="artifact-pre">${esc(content)}</pre>`;
+    }
+
+    function markdownTableHtml(markdown){
+      const rows = String(markdown || '').trim().split(/\n+/).map(line =>
+        line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(cell => cell.trim())
+      ).filter(row => row.length > 1);
+      if (rows.length < 2) return `<pre class="artifact-pre">${esc(markdown)}</pre>`;
+      const header = rows[0];
+      const body = rows.slice(2);
+      return `<table><thead><tr>${header.map(cell => `<th>${esc(cell)}</th>`).join('')}</tr></thead><tbody>${body.map(row => `<tr>${header.map((_, idx) => `<td>${esc(row[idx] || '')}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+    }
+
+    function renderLocalTaskPreview(goal){
+      renderTaskPanel({
+        goal,
+        status: 'in_progress',
+        steps: [
+          {id:'step_1', status:'in_progress'},
+          {id:'step_2', status:'pending'},
+          {id:'step_3', status:'pending'},
+          {id:'step_4', status:'pending'},
+          {id:'step_5', status:'pending'},
+        ],
+        activity: [{key:'preparing'}],
+      });
+    }
+
+    function startTaskPolling(){
+      stopTaskPolling();
+      if (!state.sessionId) return;
+      state.taskPoller = setInterval(async () => {
+        try{
+          const j = await apiGet(`/api/task/${encodeURIComponent(state.sessionId)}`);
+          if (j.task) renderTaskPanel(j.task);
+        }catch(e){}
+      }, 900);
+    }
+
+    function stopTaskPolling(){
+      if (state.taskPoller){
+        clearInterval(state.taskPoller);
+        state.taskPoller = null;
+      }
+    }
+
+    async function resumeTaskPanelIfNeeded(){
+      if (!state.taskMode || !state.sessionId) return;
+      try{
+        const j = await apiGet(`/api/task/${encodeURIComponent(state.sessionId)}`);
+        if (j.task && j.task.status !== 'ended'){
+          renderTaskPanel(j.task);
+          startTaskPolling();
+        }
+      }catch(e){}
     }
 
     function applyMode(){
@@ -2044,6 +2592,78 @@
       return await r.json();
     }
 
+    async function loadTaskHistory(){
+      const holder = $('taskHistory');
+      if (!holder) return;
+      try{
+        holder.innerHTML = `<div class="muted">${esc(tr('toolPreparing'))}</div>`;
+        const j = await apiGet('/api/tasks?limit=20');
+        state.lastTaskHistory = j.items || [];
+        renderTaskHistory(state.lastTaskHistory);
+      }catch(e){
+        holder.innerHTML = `<div class="status bad">${esc(e?.message || String(e))}</div>`;
+      }
+    }
+
+    function renderTaskHistory(items){
+      const holder = $('taskHistory');
+      if (!holder) return;
+      items = items || [];
+      if (!items.length){
+        holder.innerHTML = `<div class="muted">${esc(tr('taskHistoryEmpty'))}</div>`;
+        return;
+      }
+      holder.innerHTML = items.map(item => {
+        const title = item.goal || tr('taskDefaultGoal');
+        const updated = (item.updated_at || '').replace('T', ' ');
+        const step = Number(item.current_step || 0) + 1;
+        return `
+          <div class="task-history-item">
+            <div class="task-history-top">
+              <div style="min-width:0">
+                <div class="task-history-title">${esc(title)}</div>
+                <div class="task-history-meta">${esc(item.status || '')} · ${esc(tr(`taskStep${step}`) || '')} · ${esc(tr('taskHistoryArtifacts')(item.artifact_count || 0))}</div>
+                <div class="task-history-meta">${esc(updated)}</div>
+              </div>
+            </div>
+            <div class="task-history-actions">
+              <button type="button" data-task-continue="${esc(item.session_id || '')}">${esc(tr('taskHistoryContinue'))}</button>
+              <button type="button" data-task-end="${esc(item.session_id || '')}">${esc(tr('taskHistoryEnd'))}</button>
+            </div>
+          </div>`;
+      }).join('');
+      holder.querySelectorAll('[data-task-continue]').forEach(btn => {
+        btn.addEventListener('click', () => continueTask(btn.dataset.taskContinue || ''));
+      });
+      holder.querySelectorAll('[data-task-end]').forEach(btn => {
+        btn.addEventListener('click', () => endHistoryTask(btn.dataset.taskEnd || ''));
+      });
+    }
+
+    async function continueTask(sessionId){
+      if (!sessionId) return;
+      const j = await apiGet(`/api/task/${encodeURIComponent(sessionId)}`);
+      if (!j.task) return;
+      state.sessionId = sessionId;
+      localStorage.setItem('auctus.sid', sessionId);
+      state.taskMode = true;
+      localStorage.setItem('auctus.taskMode', '1');
+      updateTaskModeButton();
+      renderTaskPanel(j.task);
+      startTaskPolling();
+      closeSettings();
+    }
+
+    async function endHistoryTask(sessionId){
+      if (!sessionId) return;
+      await fetch(`/api/task/${encodeURIComponent(sessionId)}/end`, {method:'POST'}).catch(()=>{});
+      if (state.sessionId === sessionId){
+        state.activeTask = null;
+        renderTaskPanel(null);
+      }
+      await loadTaskHistory();
+    }
+
     let latestDownloadUrl = null;
     async function loadVersionStatus(){
       setText('#versionSummary', tr('checkingVersion'));
@@ -2123,10 +2743,19 @@
       addBubble('user', msg);
       $('message').value = '';
       autoGrow($('message'));
+      if (state.taskMode && !state.sessionId){
+        const rand = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()));
+        state.sessionId = 'web-' + rand.replace(/[^a-zA-Z0-9]/g, '').slice(0, 12);
+        localStorage.setItem('auctus.sid', state.sessionId);
+      }
+      if (state.taskMode){
+        renderLocalTaskPreview(msg);
+      }
       setBusy(true);
       state.aborter = new AbortController();
       state.stopRequested = false;
       startLogFlow();
+      if (state.taskMode) startTaskPolling();
 
       try{
         const payload = {
@@ -2135,10 +2764,12 @@
           terminal_permission: state.terminalPermission || null,
           calendar_permission: state.calendarPermission || null,
           file_permission: state.filePermission || null,
+          task_mode: !!state.taskMode,
         };
         const out = await apiPost('/api/chat', payload);
         state.sessionId = out.session_id;
         localStorage.setItem('auctus.sid', state.sessionId);
+        if (out.task) renderTaskPanel(out.task);
 
         if (out.permission_request){
           state.pendingMessage = msg;
@@ -2165,9 +2796,16 @@
             addBubble('agent', '请求已取消。');
           }
         } else {
-          addBubble('agent', '运行失败：' + (e?.message || String(e)));
+          const errMsg = e?.message || String(e);
+          const isPaymentErr = errMsg.includes('402') || errMsg.toLowerCase().includes('insufficient balance') || errMsg.toLowerCase().includes('no active subscription');
+          if (isPaymentErr) {
+            addBubble('agent', tr('noBalanceError'));
+          } else {
+            addBubble('agent', '运行失败：' + errMsg);
+          }
         }
       }finally{
+        stopTaskPolling();
         setBusy(false);
       }
     }
@@ -2208,7 +2846,7 @@
 
     async function startLogFlow(){
       // “透明实验室”式状态流：任务执行期间轮询日志，给用户可见的进度暗示
-      $('stateFlow').innerHTML = `<div class="chip"><span class="dot" style="width:7px;height:7px;background:var(--accent2)"></span><span>正在准备…</span></div>`;
+      $('stateFlow').innerHTML = `<div class="chip"><span class="dot" style="width:7px;height:7px;background:var(--accent2)"></span><span>${esc(tr('toolPreparing'))}</span></div>`;
       state.lastLogStamp = '';
       if (state.logPoller) clearInterval(state.logPoller);
       state.logPoller = setInterval(async () => {
@@ -2221,10 +2859,20 @@
           if (stamp === state.lastLogStamp) return;
           state.lastLogStamp = stamp;
           const tool = esc(last.tool_name || '');
-          const status = esc(last.status || '');
-          $('stateFlow').innerHTML = `<div class="chip"><span class="dot" style="width:7px;height:7px;background:var(--accent2)"></span><span>执行中：</span><code>${tool}</code><span class="muted" style="margin-left:6px">${status}</span></div>`;
+          const status = esc(toolStatusText(last));
+          $('stateFlow').innerHTML = `<div class="chip"><span class="dot" style="width:7px;height:7px;background:var(--accent2)"></span><span>${esc(tr('toolRunning'))}</span><code>${tool}</code><span class="muted" style="margin-left:6px">${status}</span></div>`;
         }catch(e){}
       }, 900);
+    }
+
+    function toolStatusText(item){
+      const status = String(item?.status || '').toLowerCase();
+      const tool = String(item?.tool_name || '');
+      if (status === 'error'){
+        return tool.startsWith('browser_') ? tr('toolBrowserError') : tr('toolStatusError');
+      }
+      if (status === 'success') return tr('toolStatusSuccess');
+      return item?.status || '';
     }
 
     // ====== Settings ======
@@ -2232,6 +2880,7 @@
       $('backdrop').classList.add('open');
       $('sheet').classList.add('open');
       refreshSettings().catch(()=>{});
+      loadTaskHistory().catch(()=>{});
     }
     function closeSettings(){
       $('backdrop').classList.remove('open');
@@ -2620,9 +3269,19 @@
     applyMode();
 
     $('stopBtn').onclick = () => {
-      // UI 级紧急停止：中断当前请求（不会影响后端进程，但能立刻把控制权交回用户）
+      // Stop = tell backend to bail at next iteration boundary, THEN abort the
+      // local fetch. Backend stop is fire-and-forget so the UI is responsive.
       try{
         state.stopRequested = true;
+        const sid = state.sessionId || '';
+        if (sid){
+          fetch('/api/chat/stop', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({session_id: sid}),
+            keepalive: true,
+          }).catch(()=>{});
+        }
         if (state.aborter) state.aborter.abort();
       }catch(e){}
     };
@@ -2638,9 +3297,16 @@
     };
     $('closeSettings').onclick = closeSettings;
     $('backdrop').onclick = closeSettings;
+    $('refreshTasks').onclick = () => loadTaskHistory().catch(()=>{});
+    $('artifactClose').onclick = closeTaskArtifact;
+    $('artifactModal').addEventListener('click', (e) => {
+      if (e.target === $('artifactModal')) closeTaskArtifact();
+    });
 
     $('message').addEventListener('input', () => autoGrow($('message')));
     $('chatForm').addEventListener('submit', (e) => { e.preventDefault(); if (!$('sendBtn').disabled) sendMessage($('message').value); });
+    $('taskModeBtn').onclick = toggleTaskMode;
+    updateTaskModeButton();
     // Enter 发送；Shift+Enter 换行
     // macOS 上 compositionend 可能在独立 task 触发，早于 keydown，
     // 用时间戳记录结束时刻，50ms 内的 Enter 视为输入法确认键，不发送。
@@ -3055,6 +3721,29 @@
     // Hosted API login
     let hostedSession = null; // {token, email, api_key, base_url}
 
+    function formatHostedBalance(billing) {
+      const balances = Array.isArray(billing?.balances) ? billing.balances : [];
+      if (balances.length) {
+        const global = balances.find(b => b.region === 'global');
+        const cn = balances.find(b => b.region === 'cn');
+        const parts = [];
+        if (global) parts.push(`$${Number(global.balance || 0).toFixed(2)}`);
+        if (cn) parts.push(`¥${Number(cn.balance || 0).toFixed(2)}`);
+        if (parts.length) return parts.join(' / ');
+      }
+      return `$${Number(billing?.balance?.amount || 0).toFixed(2)}`;
+    }
+
+    function renderHostedBilling(billing) {
+      billing = billing || {};
+      $('hostedBalance').textContent = formatHostedBalance(billing);
+      const sub = billing.subscription;
+      $('hostedSubscription').dataset.empty = sub ? 'false' : 'true';
+      $('hostedSubscription').textContent = sub
+        ? `${sub.plan_name || sub.plan?.name || 'Subscription'} (${tr('hostedDaysRemaining')(sub.days_remaining || 0)})`
+        : tr('hostedNoSubscription');
+    }
+
     function updateHostedUI() {
       if (hostedSession && hostedSession.token) {
         $('hostedLoginForm').style.display = 'none';
@@ -3066,6 +3755,22 @@
       }
     }
 
+    async function refreshHostedBilling() {
+      if (!hostedSession || !hostedSession.token || !hostedSession.base_url) return;
+      try {
+        const res = await fetch('/api/hosted-billing', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ base_url: hostedSession.base_url, token: hostedSession.token }),
+        });
+        if (!res.ok) return;
+        const billing = await res.json();
+        hostedSession.billing = billing;
+        localStorage.setItem('auctus.hosted_session', JSON.stringify(hostedSession));
+        renderHostedBilling(billing);
+      } catch (_) {}
+    }
+
     async function hostedLogin() {
       const email = $('setupHostedEmail').value.trim();
       const password = $('setupHostedPassword').value;
@@ -3073,11 +3778,11 @@
       const region = $('setupHostedRegion').value;
 
       if (!email || !password) {
-        setStatus('hostedLoginStatus', '请填写邮箱和密码。', 'bad');
+        setStatus('hostedLoginStatus', tr('hostedNeedCredentials'), 'bad');
         return;
       }
 
-      setStatus('hostedLoginStatus', '登录中…', '');
+      setStatus('hostedLoginStatus', tr('hostedLoggingIn'), '');
       try {
         const loginRes = await fetch('/api/hosted-login', {
           method: 'POST',
@@ -3086,7 +3791,7 @@
         });
         if (!loginRes.ok) {
           const err = await loginRes.json().catch(() => ({}));
-          throw new Error(err.detail || '登录失败');
+          throw new Error(err.detail || tr('hostedLoginFailed'));
         }
         const session = await loginRes.json();
         const billing = session.billing || {};
@@ -3098,21 +3803,19 @@
           email: session.email || email,
           api_key: apiKey,
           base_url: session.base_url || baseUrl,
-          region: session.region || region
+          region: session.region || region,
+          billing,
         };
 
-        // Update UI
-        $('hostedBalance').textContent = `$${(billing.balance?.amount || 0).toFixed(2)}`;
-        const sub = billing.subscription;
-        $('hostedSubscription').textContent = sub ? `${sub.plan_name} (${sub.days_remaining}天)` : '无';
+        renderHostedBilling(billing);
 
         updateHostedUI();
-        setStatus('hostedLoginStatus', '登录成功 ✓', 'good');
+        setStatus('hostedLoginStatus', tr('hostedLoginSuccess'), 'good');
 
         // Store in localStorage for wizard completion
         localStorage.setItem('auctus.hosted_session', JSON.stringify(hostedSession));
       } catch (e) {
-        setStatus('hostedLoginStatus', e.message || '登录失败', 'bad');
+        setStatus('hostedLoginStatus', e.message || tr('hostedLoginFailed'), 'bad');
       }
     }
 
@@ -3142,6 +3845,9 @@
       if (saved) {
         hostedSession = JSON.parse(saved);
         updateHostedUI();
+        // Restore cached billing from last login while refresh runs
+        renderHostedBilling(hostedSession.billing || {});
+        refreshHostedBilling();
       }
     } catch(e) {}
 
@@ -3230,6 +3936,7 @@
       startMobileStatusPolling();
       // initial greeting
       addBubble('agent', tr('greeting'));
+      await resumeTaskPanelIfNeeded();
       $('message').focus();
       autoGrow($('message'));
       setComposerHintForChoice();

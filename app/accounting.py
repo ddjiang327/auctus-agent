@@ -179,6 +179,13 @@ def restore_route_from_db() -> None:
         settings.llm_route = saved
 
 
+def restore_model_from_db() -> None:
+    """Called at startup to restore the model saved by set_model()."""
+    saved = get_setup_state().get("model", "").strip()
+    if saved:
+        settings.model = saved
+
+
 def current_route() -> str:
     route = (settings.llm_route or "local").strip().lower()
     return route if route in ROUTES else "local"
