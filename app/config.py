@@ -77,6 +77,13 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+# Resolve relative paths to absolute immediately so os.chdir() later can't break them.
+settings.data_dir = settings.data_dir.resolve()
+settings.output_dir = settings.output_dir.resolve()
+settings.workspace_dir = settings.workspace_dir.resolve()
+settings.logs_dir = settings.logs_dir.resolve()
+if settings.authorized_workspace_dir is not None:
+    settings.authorized_workspace_dir = settings.authorized_workspace_dir.resolve()
 settings.data_dir.mkdir(parents=True, exist_ok=True)
 settings.output_dir.mkdir(parents=True, exist_ok=True)
 settings.workspace_dir.mkdir(parents=True, exist_ok=True)

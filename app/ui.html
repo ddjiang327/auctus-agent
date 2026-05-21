@@ -1296,7 +1296,7 @@
                   <option value="cn">国内阿里云</option>
                 </select>
               </div>
-              <div class="field">
+              <div class="field" style="display:none">
                 <label id="hostedUrlLabel">API 服务器地址</label>
                 <input id="setupHostedUrl" placeholder="http://120.24.223.0" value="http://120.24.223.0" />
               </div>
@@ -1466,7 +1466,7 @@
       awaitingConfirm: null, // {type, prompt, yesLabel, yesMessage, noMessage}
       stopRequested: false,
       language: 'en',
-      taskMode: localStorage.getItem('auctus.taskMode') === '1',
+      taskMode: false,
       activeTask: null,
       taskPoller: null,
       lastTaskHistory: null,
@@ -2156,7 +2156,6 @@
 
     function toggleTaskMode(){
       state.taskMode = !state.taskMode;
-      localStorage.setItem('auctus.taskMode', state.taskMode ? '1' : '0');
       updateTaskModeButton();
       if (!state.taskMode){
         stopTaskPolling();
@@ -2647,7 +2646,6 @@
       state.sessionId = sessionId;
       localStorage.setItem('auctus.sid', sessionId);
       state.taskMode = true;
-      localStorage.setItem('auctus.taskMode', '1');
       updateTaskModeButton();
       renderTaskPanel(j.task);
       startTaskPolling();

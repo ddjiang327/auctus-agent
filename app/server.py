@@ -2862,8 +2862,9 @@ def hosted_login(body: HostedLoginIn) -> dict:
     except httpx.HTTPError as e:
         raise HTTPException(502, f"无法连接 Auctus API：{e}") from e
     except FileNotFoundError as e:
+        import traceback as _tb
         missing = getattr(e, "filename", "") or str(e)
-        print(f"[hosted-login] local file error: {missing}")
+        print(f"[hosted-login] local file error: {missing}\n{_tb.format_exc()}")
         raise HTTPException(500, f"本地文件或目录不存在，无法完成登录：{missing}") from e
 
 
@@ -4016,6 +4017,10 @@ def _settings_api_key_for_provider(provider: str) -> Optional[str]:
 def _friendly_runtime_error(message: str) -> str:
     language = _normalize_language(accounting.get_setup_state().get("system_language"))
     lowered = message.lower()
+    if "Authentication" in message or "401" in message or "Unauthorized" in message or "invalid api key" in lowered:
+        if language == "en":
+            return "Model API authentication failed. Check the API key for the current model, or switch to Own API and save a valid key."
+        return "模型 API 认证失败。请检查当前模型对应的 API key，或切换到“自己的 API”后重新保存一个有效 key。"
     if (
         "deepseekexception" in lowered
         or "nodename nor servname" in lowered
@@ -4041,13 +4046,7 @@ def _friendly_runtime_error(message: str) -> str:
         if language == "en":
             return "The current route is BYO Key, but no API key was found for this model provider. Save a key in Settings, or run Setup again."
         return "当前是 BYO Key 路由，但没有找到对应模型服务商的 API key。请在右侧保存 key，或重新运行首次设置。"
-    if "Authentication" in message or "401" in message or "Unauthorized" in message or "invalid api key" in lowered:
-        if language == "en":
-            return "Model API authentication failed. Check the API key for the current model, or switch to Own API and save a valid key."
-        return "模型 API 认证失败。请检查当前模型对应的 API key，或切换到“自己的 API”后重新保存一个有效 key。"
     return message
-
-
 def _validate_api_key_live(*, model: str, api_key: str) -> None:
     litellm.completion(
         model=model,
