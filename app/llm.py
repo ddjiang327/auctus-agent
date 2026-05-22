@@ -91,6 +91,8 @@ def _proxy_chat_completion(
     if tools:
         body["tools"] = tools
         body["tool_choice"] = "auto"
+        if _is_deepseek_model(body["model"]):
+            body["thinking"] = {"type": "disabled"}
 
     response = httpx.post(
         f"{endpoint}/chat/completions",
@@ -188,6 +190,10 @@ def _relay_model_id(model: str) -> str:
     if value.startswith("anthropic/"):
         return value.split("/", 1)[1]
     return value
+
+
+def _is_deepseek_model(model: str) -> bool:
+    return "deepseek" in (model or "").lower()
 
 
 def _settings_api_key_for_model(model: str) -> Optional[str]:

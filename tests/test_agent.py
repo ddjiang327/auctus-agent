@@ -465,10 +465,30 @@ class AgentOutputIsolationTests(unittest.TestCase):
         self.assertEqual(result["reply"], "done")
         self.assertTrue(any("Default reply language: English" in msg.get("content", "") for msg in captured_messages))
 
+    def test_english_user_message_overrides_chinese_system_language(self):
+        final_response = {
+            "model": "test-model",
+            "choices": [{"message": {"role": "assistant", "content": "done"}}],
+        }
+        captured_messages = []
+
+        def fake_completion(*, messages, tools=None, **_kwargs):
+            captured_messages.extend(messages)
+            return final_response
+
+        with patch("app.agent.accounting.get_setup_state", return_value={"system_language": "zh"}):
+            with patch("app.agent.llm.chat_completion", side_effect=fake_completion):
+                result = agent.chat("session-english-turn-language", "Please help me record 70kg today")
+
+        self.assertEqual(result["reply"], "done")
+        joined = "\n".join(msg.get("content", "") for msg in captured_messages)
+        self.assertIn("The current user message is in English. Reply in English.", joined)
+        self.assertIn("这只是默认语言；当前用户消息使用的语言优先级更高", joined)
+
     def test_chat_injects_identity_memory_context_for_who_am_i(self):
         final_response = {
             "model": "test-model",
-            "choices": [{"message": {"role": "assistant", "content": "你是 David"}}],
+            "choices": [{"message": {"role": "assistant", "content": "你是 Alex"}}],
         }
         captured_messages = []
 
@@ -479,7 +499,7 @@ class AgentOutputIsolationTests(unittest.TestCase):
         facts = [
             {
                 "title": "User profile",
-                "content": "David，44岁，程序员，住在墨尔本 Oakleigh South。",
+                "content": "Alex，44岁，程序员，住在 Example City。",
                 "confirmed": True,
             },
             {
@@ -492,11 +512,11 @@ class AgentOutputIsolationTests(unittest.TestCase):
             with patch("app.agent.llm.chat_completion", side_effect=fake_completion):
                 result = agent.chat("session-identity-context", "我是谁")
 
-        self.assertEqual(result["reply"], "你是 David")
-        list_memories.assert_called_once_with(confirmed=1, limit=12)
+        self.assertEqual(result["reply"], "你是 Alex")
+        list_memories.assert_called_once_with(confirmed=1, limit=80)
         memory_contexts = [msg["content"] for msg in captured_messages if "[相关长期记忆]" in msg.get("content", "")]
         self.assertEqual(len(memory_contexts), 1)
-        self.assertIn("David", memory_contexts[0])
+        self.assertIn("Alex", memory_contexts[0])
         self.assertIn("不要说没有记录", memory_contexts[0])
 
     def test_chat_does_not_duplicate_current_user_message(self):
@@ -577,6 +597,231 @@ class AgentOutputIsolationTests(unittest.TestCase):
 
         self.assertEqual([m["role"] for m in sanitized], ["user", "assistant", "tool", "assistant"])
         self.assertNotIn("missing", [m.get("tool_call_id") for m in sanitized])
+
+    def test_sanitize_tool_history_drops_tool_block_without_required_reasoning_content(self):
+        history = [
+            {"role": "user", "content": "hi"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "fetch_webpage", "arguments": "{}"},
+                }],
+            },
+            {"role": "tool", "tool_call_id": "call-1", "name": "fetch_webpage", "content": "{}"},
+            {"role": "assistant", "content": "done"},
+        ]
+
+        sanitized = agent._sanitize_tool_history(history, require_reasoning_content=True)
+
+        self.assertEqual(sanitized, [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "done"},
+        ])
+
+    def test_sanitize_tool_history_keeps_tool_block_with_reasoning_content(self):
+        history = [
+            {"role": "user", "content": "hi"},
+            {
+                "role": "assistant",
+                "content": "",
+                "reasoning_content": "thinking",
+                "tool_calls": [{
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "fetch_webpage", "arguments": "{}"},
+                }],
+            },
+            {"role": "tool", "tool_call_id": "call-1", "name": "fetch_webpage", "content": "{}"},
+            {"role": "assistant", "content": "done"},
+        ]
+
+        sanitized = agent._sanitize_tool_history(history, require_reasoning_content=True)
+
+        self.assertEqual([m["role"] for m in sanitized], ["user", "assistant", "tool", "assistant"])
+        self.assertEqual(sanitized[1]["reasoning_content"], "thinking")
+
+    def test_extracts_dsml_tool_calls_from_text_response(self):
+        content = (
+            "好的，我来查一下。\n\n"
+            "<｜｜DSML｜｜tool_calls>\n"
+            "<｜｜DSML｜｜invoke name=\"fetch_webpage\">\n"
+            "<｜｜DSML｜｜parameter name=\"url\" string=\"true\">https://petrolmate.com.au/city/vic/melbourne</｜｜DSML｜｜parameter>\n"
+            "<｜｜DSML｜｜parameter name=\"max_chars\" string=\"false\">5000</｜｜DSML｜｜parameter>\n"
+            "</｜｜DSML｜｜invoke>\n"
+            "</｜｜DSML｜｜tool_calls>"
+        )
+
+        calls = agent._extract_dsml_tool_calls(content)
+
+        self.assertEqual(calls[0]["function"]["name"], "fetch_webpage")
+        self.assertEqual(
+            json.loads(calls[0]["function"]["arguments"]),
+            {"url": "https://petrolmate.com.au/city/vic/melbourne", "max_chars": 5000},
+        )
+        self.assertEqual(agent._strip_dsml_tool_blocks(content), "好的，我来查一下。")
+
+    def test_sanitize_tool_history_drops_plain_dsml_text_messages(self):
+        history = [
+            {"role": "user", "content": "对比墨尔本汽车保险"},
+            {
+                "role": "assistant",
+                "content": (
+                    "<｜｜DSML｜｜tool_calls>"
+                    "<｜｜DSML｜｜invoke name=\"fetch_webpage\"></｜｜DSML｜｜invoke>"
+                    "</｜｜DSML｜｜tool_calls>"
+                ),
+            },
+            {"role": "user", "content": "hi"},
+        ]
+
+        sanitized = agent._sanitize_tool_history(history)
+
+        self.assertEqual(sanitized, [
+            {"role": "user", "content": "对比墨尔本汽车保险"},
+            {"role": "user", "content": "hi"},
+        ])
+
+    def test_auto_remember_user_profile_facts(self):
+        captured = []
+
+        def fake_upsert(*args, **kwargs):
+            captured.append((args, kwargs))
+            return "fact-1"
+
+        with patch("app.agent.memory.upsert_memory", side_effect=fake_upsert):
+            agent._auto_remember_user_facts("我叫Alex，44岁，身高175cm，体重82kg")
+
+        keys = [args[0] for args, _kwargs in captured]
+        self.assertIn("user_name", keys)
+        self.assertIn("user_age", keys)
+        self.assertIn("user_height_cm", keys)
+        self.assertIn("user_weight_kg", keys)
+
+    def test_memory_context_includes_personal_facts_for_bmi_question(self):
+        with patch("app.agent.memory.recall", return_value=[]):
+            with patch("app.agent.memory.list_memories", return_value=[
+                {"id": "1", "title": "user_age", "content": "用户年龄是 44 岁", "tags": "personal,user_info,age"},
+                {"id": "2", "title": "user_height_cm", "content": "用户身高是 175 cm", "tags": "personal,user_info,bmi"},
+            ]):
+                context = agent._memory_context("我的年龄和 BMI 是多少？")
+
+        self.assertIn("用户年龄是 44 岁", context)
+        self.assertIn("用户身高是 175 cm", context)
+        self.assertIn("BMI", context)
+
+    def test_remember_artifact_path_for_bookkeeper_file(self):
+        with patch("app.agent.memory.upsert_memory", return_value="fact-1") as upsert:
+            agent._remember_artifact_path(
+                "帮我创建一个 bookkeeper 文件帮我记账",
+                "write_file",
+                {"path": "/tmp/bookkeeper.html", "filename": "bookkeeper.html"},
+            )
+
+        self.assertEqual(upsert.call_args.args[0], "artifact_bookkeeper_path")
+        self.assertIn("/tmp/bookkeeper.html", upsert.call_args.args[1])
+
+    def test_remember_artifact_path_for_fitness_file(self):
+        with patch("app.agent.memory.upsert_memory", return_value="fact-1") as upsert:
+            agent._remember_artifact_path(
+                "帮我创建一个 fit 文件记录体重和饮食",
+                "write_file",
+                {"path": "/tmp/fit/index.html", "filename": "index.html"},
+            )
+
+        self.assertEqual(upsert.call_args.args[0], "artifact_fitness_path")
+        self.assertIn("/tmp/fit/index.html", upsert.call_args.args[1])
+
+    def test_memory_context_includes_fitness_artifact_for_weight_log(self):
+        with patch("app.agent.memory.recall", return_value=[]):
+            with patch("app.agent.memory.list_memories", return_value=[
+                {
+                    "id": "fit-1",
+                    "title": "artifact_fitness_path",
+                    "content": "用户的 fit/fitness/体重饮食记录文件路径是 /tmp/fit/index.html",
+                    "tags": "artifact,file,fit,fitness,体重,饮食,健身",
+                },
+            ]):
+                context = agent._memory_context("帮我记录今天体重 70kg")
+
+        self.assertIn("/tmp/fit/index.html", context)
+        self.assertIn("先 read_file 再 write_file", context)
+
+    def test_persistent_record_write_context_requires_target_file_update(self):
+        with patch("app.agent.memory.list_memories", return_value=[
+            {
+                "id": "fit-1",
+                "title": "artifact_fitness_path",
+                "content": "用户的 fit/fitness/体重饮食记录文件路径是 /tmp/fit/fit.html",
+                "tags": "artifact,file,fit,fitness,体重",
+            },
+        ]):
+            context = agent._persistent_record_write_context("帮我记录今天体重70kg")
+
+        self.assertIn("/tmp/fit/fit.html", context)
+        self.assertIn("必须调用 read_file", context)
+        self.assertIn("write_file 成功后", context)
+
+    def test_record_write_task_does_not_accept_reply_without_write_file(self):
+        first_reply_without_tools = {
+            "model": "test-model",
+            "choices": [{"message": {"role": "assistant", "content": "已记录。"}}],
+        }
+        write_call = {
+            "model": "test-model",
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "call-write",
+                        "type": "function",
+                        "function": {
+                            "name": "write_file",
+                            "arguments": json.dumps({
+                                "path": "/tmp/fit/fit.html",
+                                "content": "<html>70kg</html>",
+                                "overwrite": True,
+                            }),
+                        },
+                    }],
+                }
+            }],
+        }
+        final_response = {
+            "model": "test-model",
+            "choices": [{"message": {"role": "assistant", "content": "已写入 /tmp/fit/fit.html"}}],
+        }
+        captured_messages = []
+
+        def fake_completion(*, messages, tools=None, **_kwargs):
+            captured_messages.extend(messages)
+            has_tool_result = any(m.get("role") == "tool" for m in messages)
+            if has_tool_result:
+                return final_response
+            if any("[必须完成文件写入]" in m.get("content", "") for m in messages):
+                return write_call
+            return first_reply_without_tools
+
+        with patch("app.agent.memory.recall", return_value=[]):
+            with patch("app.agent.memory.list_memories", return_value=[
+                {
+                    "id": "fit-1",
+                    "title": "artifact_fitness_path",
+                    "content": "用户的 fit/fitness/体重饮食记录文件路径是 /tmp/fit/fit.html",
+                    "tags": "artifact,file,fit,fitness,体重",
+                },
+            ]):
+                with patch("app.agent.llm.chat_completion", side_effect=fake_completion):
+                    with patch("app.agent.tools.run_tool", return_value={"path": "/tmp/fit/fit.html", "ok": True}) as run_tool:
+                        result = agent.chat("session-force-write", "帮我记录今天体重70kg")
+
+        self.assertEqual(result["reply"], "已写入 /tmp/fit/fit.html")
+        self.assertEqual(run_tool.call_args.args[0], "write_file")
+        self.assertTrue(any("[必须完成文件写入]" in m.get("content", "") for m in captured_messages))
 
 
 if __name__ == "__main__":

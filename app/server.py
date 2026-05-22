@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import mimetypes
 import re
 import sqlite3
 import struct
@@ -13,7 +14,7 @@ from typing import Optional
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 import litellm
 from pydantic import BaseModel
@@ -638,7 +639,7 @@ h2{font-size:14px;margin:0 0 8px;color:#555;text-transform:uppercase;letter-spac
       <div class="field">
         <label for="setupWorkspacePath">授权工作文件夹</label>
         <div class="row" style="margin:0">
-          <input id="setupWorkspacePath" placeholder="建议新建一个专门文件夹，例如 /Users/david/Documents/Auctus Workspace" style="flex:1">
+          <input id="setupWorkspacePath" placeholder="建议新建一个专门文件夹，例如 ~/Documents/Auctus Workspace" style="flex:1">
           <button id="setupOpenFolderPicker" type="button">选择</button>
         </div>
         <div class="muted">Agent 只能在这个文件夹里读写文件。建议不要用软件安装目录；整机和 Terminal 权限需要以后单独加更严格的开关。</div>
@@ -786,7 +787,7 @@ const UI = {
     userIntro: '简短自我介绍',
     userIntroPlaceholder: '可选，例如你的工作、偏好、常用语言或项目背景',
     setupWorkspace: '授权工作文件夹',
-    setupWorkspacePlaceholder: '建议新建一个专门文件夹，例如 /Users/david/Documents/Auctus Workspace',
+    setupWorkspacePlaceholder: '建议新建一个专门文件夹，例如 ~/Documents/Auctus Workspace',
     workspaceHelp: '默认情况下 Agent 只能在这个文件夹里读写文件。建议不要用软件安装目录。',
     permissionHelp: '整台电脑权限会允许 Agent 读取/写入任意路径内支持的文本文件。请只在你确定需要时启用。',
     terminalHelp: '开启后，Agent 只有在你当前消息明确要求执行命令时才会运行终端命令。',
@@ -896,7 +897,7 @@ const UI = {
     userIntro: 'Short Self Introduction',
     userIntroPlaceholder: 'Optional, such as your work, preferences, usual language, or project background',
     setupWorkspace: 'Authorize Workspace Folder',
-    setupWorkspacePlaceholder: 'Create a dedicated folder, e.g. /Users/david/Documents/Auctus Workspace',
+    setupWorkspacePlaceholder: 'Create a dedicated folder, e.g. ~/Documents/Auctus Workspace',
     workspaceHelp: 'By default, the Agent can read and write files only inside this folder. Avoid the app install folder.',
     permissionHelp: 'Whole-computer permission allows the Agent to read/write supported text files under any path. Enable it only when you truly need it.',
     terminalHelp: 'When enabled, the Agent runs terminal commands only if your current message explicitly asks for it.',
@@ -2114,6 +2115,10 @@ class AutoModelIn(BaseModel):
     enabled: bool
 
 
+class ProactiveSuggestionsIn(BaseModel):
+    enabled: bool
+
+
 class RouteIn(BaseModel):
     route: str
 
@@ -2821,6 +2826,18 @@ def set_auto_model(body: AutoModelIn) -> dict:
     return {"enabled": body.enabled}
 
 
+@app.get("/api/proactive-suggestions")
+def get_proactive_suggestions() -> dict:
+    enabled = accounting.get_setup_state().get("proactive_suggestions", "1") == "1"
+    return {"enabled": enabled}
+
+
+@app.post("/api/proactive-suggestions")
+def set_proactive_suggestions(body: ProactiveSuggestionsIn) -> dict:
+    accounting.set_setup_state({"proactive_suggestions": "1" if body.enabled else "0"})
+    return {"enabled": body.enabled}
+
+
 @app.get("/api/language")
 def get_language() -> dict:
     state = accounting.get_setup_state()
@@ -3315,6 +3332,103 @@ def telegram_inbox(since: int = Query(0)) -> dict:
     return {"messages": msgs}
 
 
+# ── Discord config ─────────────────────────────────────────────────────────
+
+class DiscordConfigIn(BaseModel):
+    bot_token: str
+    allowed_user_ids: str = ""
+
+
+def _discord_api(token: str, path: str, method: str = "GET", body: Optional[dict] = None) -> dict:
+    import urllib.request
+    url = f"https://discord.com/api/v10{path}"
+    data = json.dumps(body).encode() if body else None
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={
+            "Authorization": f"Bot {token}",
+            "Content-Type": "application/json",
+            "User-Agent": "AuctusAgent/1 (https://github.com/auctus)",
+        },
+        method=method,
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            return {"ok": True, **json.loads(resp.read())}
+    except Exception as e:
+        return {"ok": False, "description": str(e)}
+
+
+@app.get("/api/discord/config")
+def get_discord_config() -> dict:
+    token = settings.discord_bot_token or ""
+    ids = settings.discord_allowed_user_ids
+    masked = f"...{token[-6:]}" if len(token) > 6 else ("(未配置)" if not token else token)
+    return {"configured": bool(token), "token_hint": masked, "allowed_user_ids": ids}
+
+
+@app.post("/api/discord/verify-token")
+def verify_discord_token(body: DiscordConfigIn) -> dict:
+    token = body.bot_token.strip()
+    if not token:
+        raise HTTPException(400, "bot_token is required")
+    result = _discord_api(token, "/users/@me")
+    if not result.get("ok"):
+        return {"ok": False, "error": result.get("description", "Token 无效")}
+    return {"ok": True, "username": result.get("username", ""), "id": result.get("id", "")}
+
+
+@app.post("/api/discord/save")
+def save_discord_config(body: DiscordConfigIn) -> dict:
+    token = body.bot_token.strip()
+    ids = body.allowed_user_ids.strip()
+    if not token:
+        raise HTTPException(400, "bot_token is required")
+    verify = _discord_api(token, "/users/@me")
+    if not verify.get("ok"):
+        raise HTTPException(400, verify.get("description", "Token 验证失败"))
+    env_path = Path(".env")
+    try:
+        from dotenv import set_key as _set_key
+        env_path.touch()
+        _set_key(str(env_path), "DISCORD_BOT_TOKEN", token)
+        _set_key(str(env_path), "DISCORD_ALLOWED_USER_IDS", ids)
+    except Exception as e:
+        raise HTTPException(500, f"写入 .env 失败：{e}")
+    settings.discord_bot_token = token
+    settings.discord_allowed_user_ids = ids
+    try:
+        from . import discord_bot as _dc_bot
+        _dc_bot.run_in_thread()
+    except Exception as exc:
+        raise HTTPException(500, f"Discord 配置已保存，但启动 Bot 失败：{type(exc).__name__}: {exc}")
+    return {"ok": True, "username": verify.get("username", ""), "id": verify.get("id", "")}
+
+
+@app.post("/api/discord/test-message")
+def send_discord_test(body: DiscordConfigIn) -> dict:
+    token = body.bot_token.strip() or (settings.discord_bot_token or "")
+    ids_str = body.allowed_user_ids.strip() or settings.discord_allowed_user_ids
+    if not token:
+        raise HTTPException(400, "未配置 bot_token")
+    user_ids = [x.strip() for x in ids_str.split(",") if x.strip()]
+    if not user_ids:
+        raise HTTPException(400, "请先填写允许的 Discord 用户 ID")
+    results = []
+    for uid in user_ids[:3]:
+        # Create DM channel
+        dm = _discord_api(token, "/users/@me/channels", "POST", {"recipient_id": uid})
+        if not dm.get("ok"):
+            results.append({"user_id": uid, "ok": False, "error": dm.get("description", "创建 DM 失败")})
+            continue
+        channel_id = dm.get("id", "")
+        msg = _discord_api(token, f"/channels/{channel_id}/messages", "POST",
+                           {"content": "✅ Auctus Agent 已成功连接 Discord！"})
+        results.append({"user_id": uid, "ok": msg.get("ok", False), "error": msg.get("description", "")})
+    return {"ok": all(r["ok"] for r in results), "results": results}
+
+
 # ── Feishu config ──────────────────────────────────────────────────────────
 
 class FeishuConfigIn(BaseModel):
@@ -3586,6 +3700,30 @@ def delete_playbook(pb_id: str):
     return {"ok": removed}
 
 
+@app.get("/api/skills")
+def list_skills_api():
+    from . import skills_manager
+    return {"skills": skills_manager.list_skills()}
+
+
+class SkillToggleBody(BaseModel):
+    skill_id: str
+
+
+@app.post("/api/skills/{skill_id}/toggle")
+def toggle_skill_api(skill_id: str):
+    from . import skills_manager
+    updated = skills_manager.toggle_skill(skill_id)
+    return {"ok": True, "skill": updated}
+
+
+@app.delete("/api/skills/{skill_id}")
+def delete_skill_api(skill_id: str):
+    from . import skills_manager
+    removed = skills_manager.delete_skill(skill_id)
+    return {"ok": removed}
+
+
 @app.get("/api/daily-brief/config")
 def get_daily_brief_config():
     from . import cronjobs
@@ -3595,12 +3733,13 @@ def get_daily_brief_config():
 class DailyBriefBody(BaseModel):
     enabled: bool
     hour: int = 8
+    target: str = "telegram"
 
 
 @app.post("/api/daily-brief/config")
 def set_daily_brief_config(body: DailyBriefBody):
     from . import cronjobs
-    return cronjobs.set_daily_brief(body.enabled, body.hour)
+    return cronjobs.set_daily_brief(body.enabled, body.hour, body.target)
 
 
 @app.get("/api/stats")
@@ -3695,22 +3834,61 @@ async def rag_remove_folder(folder: str = Query(...)):
 @app.get("/api/outputs")
 def list_outputs():
     """List generated files in outputs/ directory, newest first."""
+    files = _list_files_under(settings.output_dir, source="outputs", url_prefix="/files")
+    files.sort(key=lambda f: f["modified"], reverse=True)
+    return {"files": files}
+
+
+@app.get("/api/files")
+def list_all_files():
+    """List user-visible files from both generated outputs/ and workspace inputs/."""
+    files = _list_files_under(settings.output_dir, source="outputs", url_prefix="/files")
+    files.extend(_list_files_under(settings.workspace_dir, source="inputs", url_prefix="/workspace-files"))
+    files.sort(key=lambda f: f["modified"], reverse=True)
+    return {
+        "files": files,
+        "roots": {
+            "outputs": str(settings.output_dir.resolve()),
+            "inputs": str(settings.workspace_dir.resolve()),
+        },
+    }
+
+
+@app.get("/workspace-files/{path:path}")
+def serve_workspace_file(path: str):
+    root = settings.workspace_dir.resolve()
+    target = (root / path).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError:
+        raise HTTPException(404, "file not found")
+    if not target.is_file():
+        raise HTTPException(404, "file not found")
+    media_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
+    return FileResponse(target, media_type=media_type, filename=target.name)
+
+
+def _list_files_under(root_dir: Path, *, source: str, url_prefix: str) -> list[dict]:
     import os
-    output_dir = settings.output_dir
+    base = root_dir.resolve()
     files: list[dict] = []
     try:
-        for root, dirs, filenames in os.walk(output_dir):
-            dirs[:] = sorted(dirs)
+        for root, dirs, filenames in os.walk(base):
+            dirs[:] = sorted(d for d in dirs if not d.startswith("."))
             for fname in sorted(filenames):
+                if fname.startswith("."):
+                    continue
                 fpath = Path(root) / fname
                 try:
                     stat = fpath.stat()
-                    rel = fpath.relative_to(output_dir)
+                    rel = fpath.relative_to(base)
+                    rel_url = str(rel).replace(chr(92), "/")
                     ext = fpath.suffix.lower()
                     files.append({
                         "name": fname,
                         "path": str(rel),
-                        "url": f"/files/{str(rel).replace(chr(92), '/')}",
+                        "source": source,
+                        "url": f"{url_prefix}/{rel_url}",
                         "size": stat.st_size,
                         "modified": stat.st_mtime,
                         "type": _output_file_type(ext),
@@ -3719,8 +3897,7 @@ def list_outputs():
                     pass
     except OSError:
         pass
-    files.sort(key=lambda f: f["modified"], reverse=True)
-    return {"files": files}
+    return files
 
 
 def _output_file_type(ext: str) -> str:

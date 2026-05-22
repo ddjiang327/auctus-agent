@@ -601,13 +601,21 @@ def stop_scheduler() -> None:
 _DAILY_BRIEF_JOB_NAME = "__daily_brief__"
 
 
-def _daily_brief_prompt() -> str:
+def _daily_brief_prompt(target: str = "telegram") -> str:
+    if target == "mobile":
+        push_instruction = (
+            "如果 Auctus Mobile relay 已配置，请同时通过 relay 把简报推送到 Auctus Mobile App。"
+        )
+    else:
+        push_instruction = (
+            "如果 Telegram 已配置，请同时用 send_telegram_message 工具把简报发送给用户。"
+        )
     return (
         "请生成今日简报：1) 今天的日期和星期；"
         "2) 本周（含今天）对话次数（从记忆/日志估算）；"
         "3) 接下来 24 小时内有无定时任务即将触发；"
         "4) 一句积极的开始建议。"
-        "如果 Telegram 已配置，请同时用 send_telegram_message 工具把简报发送给用户。"
+        f"{push_instruction}"
         "回复要简洁，控制在 150 字以内。"
     )
 
@@ -618,6 +626,7 @@ def get_daily_brief_config() -> dict:
     return {
         "enabled": state.get("daily_brief_enabled", "0") == "1",
         "hour": int(state.get("daily_brief_hour", "8")),
+        "target": state.get("daily_brief_target", "telegram"),
     }
 
 
@@ -782,12 +791,14 @@ def _event_loop() -> None:
         _stop_event.wait(60)
 
 
-def set_daily_brief(enabled: bool, hour: int = 8) -> dict:
+def set_daily_brief(enabled: bool, hour: int = 8, target: str = "telegram") -> dict:
     from . import accounting
     hour = max(0, min(23, int(hour)))
+    target = target if target in ("telegram", "mobile") else "telegram"
     accounting.set_setup_state({
         "daily_brief_enabled": "1" if enabled else "0",
         "daily_brief_hour": str(hour),
+        "daily_brief_target": target,
     })
     jobs = _read_jobs()
     jobs = [j for j in jobs if j.name != _DAILY_BRIEF_JOB_NAME]
@@ -797,10 +808,10 @@ def set_daily_brief(enabled: bool, hour: int = 8) -> dict:
             name=_DAILY_BRIEF_JOB_NAME,
             schedule=f"0 {hour} * * *",
             script_path="",
-            description=_daily_brief_prompt(),
+            description=_daily_brief_prompt(target),
             enabled=True,
             created_at=time.time(),
         )
         jobs.append(job)
     _write_jobs(jobs)
-    return {"ok": True, "enabled": enabled, "hour": hour}
+    return {"ok": True, "enabled": enabled, "hour": hour, "target": target}

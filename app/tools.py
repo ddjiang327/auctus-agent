@@ -504,6 +504,10 @@ REACT_PROTOTYPE_TEMPLATE = """<!doctype html>
 </head>
 <body class="bg-gray-50 min-h-screen">
 <div id="root"></div>
+{% if app_data_json %}
+<script id="app-data" type="application/json">{{ app_data_json }}</script>
+<script>window.__APP_DATA__ = JSON.parse(document.getElementById('app-data').textContent);</script>
+{% endif %}
 <script type="text/babel">
 {{ jsx_code }}
 const root = ReactDOM.createRoot(document.getElementById('root'));
@@ -516,13 +520,20 @@ root.render(<App />);
 """
 
 
-def make_react_prototype(title: str, jsx_code: str) -> dict:
+def make_react_prototype(title: str, jsx_code: str, data: Any = None) -> dict:
     """生成 React + Tailwind 单页原型（CDN 版，可直接浏览器打开）。
 
     jsx_code: 完整 JSX 代码，必须包含 function App() {...} 组件。
+    data: 可选，任意 JSON 可序列化对象，会内嵌为 window.__APP_DATA__，JSX 直接读取即可。
     """
+    app_data_json = json.dumps(data, ensure_ascii=False) if data is not None else ""
     tpl = Template(REACT_PROTOTYPE_TEMPLATE)
-    html = tpl.render(title=title, jsx_code=jsx_code, now=time.strftime("%Y-%m-%d %H:%M"))
+    html = tpl.render(
+        title=title,
+        jsx_code=jsx_code,
+        app_data_json=app_data_json,
+        now=time.strftime("%Y-%m-%d %H:%M"),
+    )
     fname = f"{int(time.time())}_{_safe(title)}_prototype.html"
     out_path = settings.output_dir / fname
     out_path.write_text(html, encoding="utf-8")
@@ -1093,6 +1104,32 @@ def note_search(query: str, limit: int = 5) -> dict:
         return {"results": matches}
 
 
+def skill_create(name: str, description: str, prompt_content: str, trigger_keywords: str = "") -> dict:
+    """Create a user-defined skill from a natural-language description."""
+    from . import skills_manager
+    keywords = [k.strip() for k in trigger_keywords.split(",") if k.strip()] if trigger_keywords else []
+    skill = skills_manager.create_skill(
+        name=name,
+        description=description,
+        prompt_content=prompt_content,
+        trigger_keywords=keywords,
+    )
+    return {"ok": True, "skill": skill}
+
+
+def skill_list() -> dict:
+    """List all user-defined skills."""
+    from . import skills_manager
+    return {"skills": skills_manager.list_skills()}
+
+
+def skill_delete(skill_id: str) -> dict:
+    """Delete a user-defined skill by ID."""
+    from . import skills_manager
+    removed = skills_manager.delete_skill(skill_id)
+    return {"ok": removed}
+
+
 def _gh(args: list[str], timeout: int = 20) -> dict:
     """Run a gh CLI command and return {ok, stdout, stderr}."""
     try:
@@ -1486,6 +1523,9 @@ _RISK = {
     "note_create": "low",
     "note_list": "low",
     "note_search": "low",
+    "skill_create": "low",
+    "skill_list": "low",
+    "skill_delete": "medium",
     "create_event_trigger": "medium",
     "github_list_issues": "low",
     "github_get_issue": "low",
@@ -2135,14 +2175,18 @@ TOOL_SCHEMAS: list[dict] = [
         "type": "function",
         "function": {
             "name": "make_react_prototype",
-            "description": "生成 React + Tailwind 单页原型 HTML（CDN 版，可直接浏览器打开，无需构建）。",
+            "description": "生成 React + Tailwind 单页原型 HTML（CDN 版，可直接浏览器打开，无需构建）。如果页面需要展示数据（列表、图表、表格等），必须通过 data 参数传入，不要在 JSX 里写 fetch()——生成的是静态文件，没有后端。JSX 通过 window.__APP_DATA__ 读取数据。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "title": {"type": "string", "description": "页面标题"},
                     "jsx_code": {
                         "type": "string",
-                        "description": "完整 JSX 代码，必须包含 function App() {...} 组件，可使用 Tailwind class。",
+                        "description": "完整 JSX 代码，必须包含 function App() {...} 组件，可使用 Tailwind class。需要数据时用 const data = window.__APP_DATA__ 读取，不要用 fetch。",
+                    },
+                    "data": {
+                        "type": ["object", "array", "null"],
+                        "description": "页面需要展示的数据，任意 JSON 可序列化结构（对象或数组）。会内嵌到 HTML 里，JSX 通过 window.__APP_DATA__ 直接读取，无需网络请求。",
                     },
                 },
                 "required": ["title", "jsx_code"],
@@ -2399,6 +2443,45 @@ TOOL_SCHEMAS: list[dict] = [
                     "limit": {"type": "integer", "description": "返回条数，默认 5"},
                 },
                 "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "skill_create",
+            "description": "根据用户在对话里描述的行为规则，创建一个自定义技能并永久注入到系统提示。用户说'帮我建一个技能'、'以后遇到X就Y'、'记住这个习惯'、'定义一个规则'时调用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "技能名称，简短描述性，如'财报分析助手'"},
+                    "description": {"type": "string", "description": "技能用途说明，一两句话"},
+                    "prompt_content": {"type": "string", "description": "注入系统提示的具体指令，说明遇到什么场景时怎么做"},
+                    "trigger_keywords": {"type": "string", "description": "触发关键词，逗号分隔，可选，如'财报分析,financial report'"},
+                },
+                "required": ["name", "description", "prompt_content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "skill_list",
+            "description": "列出所有用户自定义技能及其启用状态。用户问'我有哪些技能'、'查看技能'时调用。",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "skill_delete",
+            "description": "删除一个用户自定义技能。用户说'删除这个技能'、'不需要这个技能了'时调用。先用 skill_list 确认 ID。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "skill_id": {"type": "string", "description": "技能 ID（从 skill_list 获取）"},
+                },
+                "required": ["skill_id"],
             },
         },
     },
@@ -3042,6 +3125,9 @@ _BASE_TOOL_NAMES = {
     "note_list",
     "note_search",
     "list_memories",
+    "skill_create",
+    "skill_list",
+    "skill_delete",
 }
 _RESEARCH_TOOL_NAMES = {
     "search_web",
@@ -3181,6 +3267,9 @@ _DISPATCH = {
     "note_create": note_create,
     "note_list": note_list,
     "note_search": note_search,
+    "skill_create": skill_create,
+    "skill_list": skill_list,
+    "skill_delete": skill_delete,
     "create_event_trigger": create_event_trigger,
     "github_list_issues": github_list_issues,
     "github_get_issue": github_get_issue,

@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import html
 import json
 import re
 from datetime import datetime
@@ -14,7 +15,7 @@ from typing import Optional
 from urllib.parse import urlparse
 
 from .config import settings
-from . import accounting, evidence, evolution, intent, llm, memory, playbooks, preferences, routing, session_control, task_mode, tools
+from . import accounting, evidence, evolution, intent, llm, memory, playbooks, preferences, routing, session_control, skills_manager, task_mode, tools
 
 PROMPTS_DIR = Path(__file__).parent.parent / "prompts"
 
@@ -35,6 +36,7 @@ def _build_messages(
     user_text: str,
     extra_system_context: Optional[str] = None,
     intent_decision: Optional[dict] = None,
+    model: str = "",
 ) -> list[dict]:
     """组装一次完整调用所需的 messages：system + 摘要 + 历史 + 当前。"""
     intent_decision = intent_decision or intent.classify(user_text, extra_system_context=extra_system_context)
@@ -45,12 +47,16 @@ def _build_messages(
         keep_recent=12,
         token_budget=settings.context_token_budget,
     )
-    history = _sanitize_tool_history(history)
+    history = _sanitize_tool_history(
+        history,
+        require_reasoning_content=_requires_reasoning_content_echo(model),
+    )
 
     msgs: list[dict] = [{"role": "system", "content": _system_prompt()}]
     msgs.append({"role": "system", "content": _datetime_context()})
     msgs.append({"role": "system", "content": _workspace_context()})
     msgs.append({"role": "system", "content": _language_context()})
+    msgs.append({"role": "system", "content": _turn_language_context(user_text)})
     msgs.append({"role": "system", "content": _persona_context()})
     preference_context = preferences.context(max_chars=800)
     if preference_context:
@@ -66,6 +72,14 @@ def _build_messages(
     playbook_context = playbooks.context_for(user_text)
     if playbook_context:
         msgs.append({"role": "system", "content": playbook_context})
+    skills_context = skills_manager.context_for_all_enabled()
+    if skills_context:
+        msgs.append({"role": "system", "content": skills_context})
+    if intent_decision.get("should_suggest_automation") and accounting.get_setup_state().get("proactive_suggestions", "1") == "1":
+        msgs.append({"role": "system", "content": "当前用户消息含有重复性/定期任务特征。如果回答完任务后语境自然合适，可用一句话问用户是否要设置定时任务自动执行，但不要强行插入，判断是否真的适合再问。"})
+    record_write_context = _persistent_record_write_context(user_text)
+    if record_write_context:
+        msgs.append({"role": "system", "content": record_write_context})
     pinned = _pinned_context()
     if pinned:
         msgs.append({"role": "system", "content": pinned})
@@ -104,11 +118,13 @@ def chat(
                 session_id=session_id,
                 route=accounting.current_route(),
             ):
+                effective_model = routing.resolve_model(intent_decision.get("model_tier") or routing.classify(user_text))
                 msgs = _build_messages(
                     session_id,
                     user_text,
                     extra_system_context=extra_system_context,
                     intent_decision=intent_decision,
+                    model=effective_model,
                 )
                 if explicit_paths:
                     msgs.insert(-1, {
@@ -120,8 +136,8 @@ def chat(
                         "如果是文件夹，可以读取其目录列表及子文件。"
                         ),
                     })
-                effective_model = routing.resolve_model(intent_decision.get("model_tier") or routing.classify(user_text))
                 memory.append_message(session_id, {"role": "user", "content": user_text})
+                _auto_remember_user_facts(user_text)
                 effective_allow_tools = allow_tools and bool(intent_decision.get("use_tools", True))
                 if not effective_allow_tools:
                     resp = llm.chat_completion(messages=msgs, model=effective_model)
@@ -136,7 +152,15 @@ def chat(
                     extra_system_context=extra_system_context,
                     intent_decision=intent_decision,
                 )
-                return _chat_with_tools(session_id, user_text, msgs, files_produced, tool_schemas, model=effective_model)
+                return _chat_with_tools(
+                    session_id,
+                    user_text,
+                    msgs,
+                    files_produced,
+                    tool_schemas,
+                    model=effective_model,
+                    require_file_write=bool(_persistent_record_write_context(user_text)),
+                )
     finally:
         settings.output_dir = base_output_dir
 
@@ -148,6 +172,7 @@ def _chat_with_tools(
     files_produced: list[str],
     tool_schemas: list[dict],
     model: str = "",
+    require_file_write: bool = False,
 ) -> dict:
     """Run the tool-use loop. Assumes output_dir and usage context are already set."""
     last_tool_results: list[dict] = []
@@ -160,6 +185,12 @@ def _chat_with_tools(
 
         resp = llm.chat_completion(messages=msgs, tools=tool_schemas, model=model)
         ai_msg = resp["choices"][0]["message"]
+        dsml_tool_calls = _extract_dsml_tool_calls(ai_msg.get("content") or "", iteration=iteration)
+        if dsml_tool_calls and not ai_msg.get("tool_calls"):
+            clean_content = _strip_dsml_tool_blocks(ai_msg.get("content") or "")
+            ai_msg = dict(ai_msg)
+            ai_msg["content"] = clean_content
+            ai_msg["tool_calls"] = dsml_tool_calls
         msgs.append(ai_msg)
 
         # 提取 token 用量（LiteLLM 标准化格式）
@@ -173,6 +204,18 @@ def _chat_with_tools(
 
         tool_calls = ai_msg.get("tool_calls") or []
         if not tool_calls:
+            if require_file_write and not _has_successful_write_file(last_tool_results):
+                msgs.append({
+                    "role": "system",
+                    "content": (
+                        "[必须完成文件写入]\n"
+                        "本轮是长期记录更新任务，但你还没有成功调用 write_file。"
+                        "不能回复“已记录/已保存/完成”。下一步必须先 read_file 目标文件，"
+                        "把用户的新记录追加到文件内的数据结构，再调用 write_file 覆盖同一个文件。"
+                        "如果无法写入，最终必须明确说没有记录成功。"
+                    ),
+                })
+                continue
             # 普通回复，结束
             raw_content = ai_msg.get("content") or ""
             if _needs_comparison_table(user_text, raw_content, last_tool_results):
@@ -206,6 +249,7 @@ def _chat_with_tools(
 
             if isinstance(result, dict) and "path" in result:
                 files_produced.append(result["path"])
+                _remember_artifact_path(user_text, name, result)
             last_tool_results.append({
                 "name": name,
                 "result": result,
@@ -526,13 +570,46 @@ def _language_context() -> str:
         return (
             "[System Language]\n"
             "- Default reply language: English.\n"
-            "- Reply in English unless the user explicitly asks for another language or the task requires preserving original wording.\n"
+            "- This is only the default. The current user message language has higher priority.\n"
         )
     return (
         "[系统语言]\n"
         "- 默认回复语言：中文。\n"
-        "- 除非用户明确要求其他语言，或任务需要保留原文，否则用中文回复。\n"
+        "- 这只是默认语言；当前用户消息使用的语言优先级更高。\n"
     )
+
+
+def _turn_language_context(user_text: str) -> str:
+    lang = _detect_turn_language(user_text)
+    if lang == "en":
+        return (
+            "[Current Turn Language]\n"
+            "- The current user message is in English. Reply in English.\n"
+            "- Do not switch to Chinese just because the saved system language or older conversation is Chinese.\n"
+        )
+    if lang == "zh":
+        return (
+            "[当前轮次语言]\n"
+            "- 当前用户消息是中文。请用中文回复。\n"
+            "- 不要因为历史对话或默认系统语言切换到英文。\n"
+        )
+    return (
+        "[当前轮次语言]\n"
+        "- 当前用户消息语言不明确。使用系统默认语言回复；如果用户明确要求某种语言，则按用户要求。\n"
+    )
+
+
+def _detect_turn_language(user_text: str) -> str:
+    text = user_text or ""
+    cjk_count = len(re.findall(r"[\u4e00-\u9fff]", text))
+    latin_words = re.findall(r"[A-Za-z]{2,}", text)
+    if cjk_count >= 2 and cjk_count >= len(latin_words):
+        return "zh"
+    if len(latin_words) >= 2 and cjk_count == 0:
+        return "en"
+    if len(latin_words) >= 4 and len(latin_words) > cjk_count * 2:
+        return "en"
+    return "unknown"
 
 
 _IDENTITY_MEMORY_PATTERNS = (
@@ -540,12 +617,45 @@ _IDENTITY_MEMORY_PATTERNS = (
     "你知道我是谁",
     "你还记得我是谁",
     "我的名字",
+    "我的年龄",
+    "我多大",
+    "年龄",
+    "身高",
+    "体重",
+    "bmi",
     "我叫什么",
     "关于我",
     "我的身份",
     "who am i",
     "what do you know about me",
     "what is my name",
+    "my age",
+    "how old am i",
+)
+_BOOKKEEPING_MEMORY_PATTERNS = (
+    "记账",
+    "账本",
+    "账单",
+    "支出",
+    "收入",
+    "花了",
+    "消费",
+    "bookkeeper",
+    "ledger",
+)
+_FITNESS_MEMORY_PATTERNS = (
+    "健身",
+    "体重",
+    "饮食",
+    "训练",
+    "卡路里",
+    "蛋白",
+    "fitness",
+    "workout",
+    "meal",
+    "calorie",
+    "protein",
+    "bmi",
 )
 
 
@@ -553,10 +663,18 @@ def _memory_context(user_text: str) -> str:
     text = user_text.strip().lower()
     if not text:
         return ""
-    if any(pattern in text for pattern in _IDENTITY_MEMORY_PATTERNS):
-        facts = memory.list_memories(confirmed=1, limit=12)
+    wants_identity = any(pattern in text for pattern in _IDENTITY_MEMORY_PATTERNS)
+    wants_bookkeeping = any(pattern in text for pattern in _BOOKKEEPING_MEMORY_PATTERNS)
+    wants_fitness = _matches_fitness_record(text)
+    if wants_identity or wants_bookkeeping or wants_fitness:
+        facts = _relevant_memories_for_turn(
+            user_text,
+            wants_identity=wants_identity,
+            wants_bookkeeping=wants_bookkeeping,
+            wants_fitness=wants_fitness,
+        )
         if not facts:
-            return "[相关长期记忆]\n- 当前没有已确认的用户身份或偏好记忆。"
+            return ""
         lines = []
         for fact in facts:
             title = fact.get("title") or fact.get("key") or "记忆"
@@ -564,12 +682,300 @@ def _memory_context(user_text: str) -> str:
             if content:
                 lines.append(f"- {title}: {content}")
         if lines:
-            return (
-                "[相关长期记忆]\n"
-                + "\n".join(lines[:12])
-                + "\n用户询问自己是谁、叫什么或你知道关于他的什么时，必须优先根据这些记忆回答；不要说没有记录。"
-            )
+            guidance = []
+            if wants_identity:
+                guidance.append("用户询问姓名、年龄、身高、体重、BMI 或个人资料时，必须优先根据这些记忆回答；不要说没有记录；缺少身高/体重时说明无法计算 BMI 并只追问缺失项。")
+            if wants_bookkeeping:
+                guidance.append("用户要求记账或继续维护账本时，优先使用记忆里的 bookkeeper/账本文件路径，不要说找不到文件；如需修改文件，先 read_file 再 write_file。")
+            if wants_fitness:
+                guidance.append("用户要求记录或查询体重、饮食、健身、BMI 时，优先使用记忆里的 fit/fitness/体重饮食记录文件路径；如需追加记录，先 read_file 再 write_file 覆盖同一个文件。")
+            return "[相关长期记忆]\n" + "\n".join(lines[:15]) + "\n" + "\n".join(guidance)
     return ""
+
+
+def _persistent_record_write_context(user_text: str) -> str:
+    text = (user_text or "").strip().lower()
+    if not _looks_like_persistent_record_write(text):
+        return ""
+    wants_bookkeeping = any(pattern in text for pattern in _BOOKKEEPING_MEMORY_PATTERNS)
+    wants_fitness = _matches_fitness_record(text)
+    if not wants_bookkeeping and not wants_fitness:
+        return ""
+
+    key = "artifact_bookkeeper_path" if wants_bookkeeping else "artifact_fitness_path"
+    label = "bookkeeper/记账" if wants_bookkeeping else "fit/fitness/体重饮食"
+    path = _remembered_artifact_path(key)
+    if not path:
+        return ""
+    return (
+        f"[必须写入长期记录文件]\n"
+        f"- 本轮用户是在追加一条 {label} 记录，不是普通聊天。\n"
+        f"- 目标文件路径：{path}\n"
+        "- 必须调用 read_file 读取这个文件，然后调用 write_file 覆盖同一个路径，把本轮新记录追加进文件内的数据结构。\n"
+        "- 如果文件使用 localStorage，也必须同步更新文件内的固定数据数组或 JSON 数据区；不能只依赖浏览器 localStorage。\n"
+        "- 只有 write_file 成功后，才可以回复已记录，并在回复里提到写入的准确路径。\n"
+        "- 如果 read_file 或 write_file 失败，必须明确说没有记录成功，不要口头确认。"
+    )
+
+
+def _looks_like_persistent_record_write(text: str) -> bool:
+    if not text:
+        return False
+    write_words = (
+        "记录",
+        "记一下",
+        "记下",
+        "记一笔",
+        "记账",
+        "添加",
+        "新增",
+        "保存",
+        "log",
+        "record",
+        "add",
+        "save",
+    )
+    if any(word in text for word in write_words):
+        return True
+    return bool(re.search(r"\b\d+(?:\.\d+)?\s*(kg|公斤|千克|cal|kcal|g)\b", text))
+
+
+def _remembered_artifact_path(key: str) -> str:
+    for fact in memory.list_memories(confirmed=1, limit=120):
+        fact_key = str(fact.get("key") or fact.get("title") or "")
+        if fact_key != key:
+            continue
+        content = str(fact.get("value") or fact.get("content") or "")
+        match = re.search(r"(/[^。\n\r]+)", content)
+        if match:
+            return match.group(1).strip()
+    return ""
+
+
+def _relevant_memories_for_turn(
+    user_text: str,
+    *,
+    wants_identity: bool,
+    wants_bookkeeping: bool,
+    wants_fitness: bool = False,
+) -> list[dict]:
+    out: list[dict] = []
+    seen: set[str] = set()
+
+    def add(fact: dict) -> None:
+        fid = str(fact.get("id") or fact.get("key") or fact.get("title") or "")
+        if fid and fid in seen:
+            return
+        if fid:
+            seen.add(fid)
+        out.append(fact)
+
+    for fact in memory.recall(user_text, top_k=8):
+        if _fact_matches_memory_need(
+            fact,
+            user_text,
+            wants_identity=wants_identity,
+            wants_bookkeeping=wants_bookkeeping,
+            wants_fitness=wants_fitness,
+        ):
+            add(fact)
+    for fact in memory.list_memories(confirmed=1, limit=80):
+        if _fact_matches_memory_need(
+            fact,
+            user_text,
+            wants_identity=wants_identity,
+            wants_bookkeeping=wants_bookkeeping,
+            wants_fitness=wants_fitness,
+        ):
+            add(fact)
+    has_explicit_bookkeeper_path = any(
+        str(fact.get("key") or fact.get("title") or "") == "artifact_bookkeeper_path"
+        for fact in out
+    )
+    if wants_bookkeeping and not has_explicit_bookkeeper_path:
+        for path in _bookkeeper_file_candidates():
+            add({
+                "id": f"bookkeeper-file:{path}",
+                "key": "bookkeeper_candidate_file",
+                "value": f"找到可能的 bookkeeper/记账本文件：{path}",
+                "type": "project",
+                "importance": 4,
+                "tags": "artifact,file,bookkeeper,记账,账本",
+            })
+    has_explicit_fitness_path = any(
+        str(fact.get("key") or fact.get("title") or "") == "artifact_fitness_path"
+        for fact in out
+    )
+    if wants_fitness and not has_explicit_fitness_path:
+        for path in _fitness_file_candidates():
+            add({
+                "id": f"fitness-file:{path}",
+                "key": "fitness_candidate_file",
+                "value": f"找到可能的 fit/fitness/体重饮食记录文件：{path}",
+                "type": "project",
+                "importance": 4,
+                "tags": "artifact,file,fit,fitness,体重,饮食,健身",
+            })
+    return out[:15]
+
+
+def _fact_matches_memory_need(
+    fact: dict,
+    user_text: str,
+    *,
+    wants_identity: bool,
+    wants_bookkeeping: bool,
+    wants_fitness: bool = False,
+) -> bool:
+    query = (user_text or "").lower()
+    wants_license = any(token in query for token in ("驾照", "驾驶证", "license", "licence"))
+    key = str(fact.get("title") or fact.get("key") or "").lower()
+    content = str(fact.get("content") or fact.get("value") or "").lower()
+    tags = str(fact.get("tags") or "").lower()
+    haystack = f"{key} {content} {tags}"
+    if any(token in haystack for token in ("driving license", "driver license", "驾驶证", "驾照")) and not wants_license:
+        return False
+    if wants_identity and any(token in haystack for token in ("personal", "user_info", "user_", "user profile", "年龄", "身高", "体重", "bmi", "44岁")):
+        return True
+    if wants_bookkeeping and any(token in haystack for token in ("bookkeeper", "ledger", "记账", "账本", "finance", "accounting")):
+        return True
+    if wants_fitness and (
+        any(token in haystack for token in ("fitness", "健身", "体重", "饮食", "训练", "health", "workout", "meal"))
+        or _matches_fitness_record(haystack)
+    ):
+        return True
+    return False
+
+
+def _matches_fitness_record(text: str) -> bool:
+    haystack = (text or "").lower()
+    if any(pattern in haystack for pattern in _FITNESS_MEMORY_PATTERNS):
+        return True
+    return bool(re.search(r"(^|[^a-z])fit([^a-z]|$)", haystack))
+
+
+def _auto_remember_user_facts(user_text: str) -> None:
+    """Persist simple first-person facts without relying on the model to call memory tools."""
+    text = (user_text or "").strip()
+    if not text:
+        return
+    facts: list[tuple[str, str, list[str], str, int]] = []
+
+    name_match = re.search(
+        r"(?:我(?:的)?(?:名字)?叫|我是|my name is|i am)\s*([A-Za-z][A-Za-z .'-]{1,40}|[\u4e00-\u9fff]{2,12})",
+        text,
+        re.I,
+    )
+    if name_match:
+        name = name_match.group(1).strip(" ，,。.!！")
+        if name.lower() not in {"here", "from", "a", "an", "the"}:
+            facts.append(("user_name", f"用户名字是 {name}", ["personal", "user_info", "name"], "preference", 5))
+
+    age_match = re.search(r"(?:我(?:今年)?|年龄|age(?: is)?)\s*[:：]?\s*(\d{1,3})\s*(?:岁|years old|yo)?", text, re.I)
+    if not age_match:
+        age_match = re.search(r"(\d{1,3})\s*岁", text)
+    if age_match:
+        age = int(age_match.group(1))
+        if 1 <= age <= 120:
+            facts.append(("user_age", f"用户年龄是 {age} 岁", ["personal", "user_info", "age", "年龄"], "preference", 5))
+
+    height_match = re.search(r"(?:身高|height)\s*[:：]?\s*(\d{2,3}(?:\.\d+)?)\s*(cm|厘米|m|米)?", text, re.I)
+    if height_match:
+        height = float(height_match.group(1))
+        unit = (height_match.group(2) or "cm").lower()
+        if unit in {"m", "米"}:
+            height *= 100
+        if 80 <= height <= 250:
+            facts.append(("user_height_cm", f"用户身高是 {height:g} cm", ["personal", "user_info", "height", "身高", "bmi"], "preference", 5))
+
+    weight_match = re.search(r"(?:体重|weight)\s*[:：]?\s*(\d{2,3}(?:\.\d+)?)\s*(kg|公斤|千克)?", text, re.I)
+    if weight_match:
+        weight = float(weight_match.group(1))
+        if 20 <= weight <= 300:
+            facts.append(("user_weight_kg", f"用户体重是 {weight:g} kg", ["personal", "user_info", "weight", "体重", "bmi"], "preference", 5))
+
+    for key, value, tags, fact_type, importance in facts:
+        try:
+            memory.upsert_memory(key, value, tags=tags, type=fact_type, source="chat", importance=importance)
+        except Exception:
+            pass
+
+
+def _remember_artifact_path(user_text: str, tool_name: str, result: dict) -> None:
+    path = str(result.get("path") or "").strip()
+    if not path:
+        return
+    filename = str(result.get("filename") or Path(path).name)
+    text = f"{user_text} {filename}".lower()
+    if any(pattern in text for pattern in _BOOKKEEPING_MEMORY_PATTERNS):
+        try:
+            memory.upsert_memory(
+                "artifact_bookkeeper_path",
+                f"用户的 bookkeeper/记账本文件路径是 {path}",
+                tags=["artifact", "file", "bookkeeper", "记账", "账本", "finance", "accounting"],
+                type="project",
+                source=f"tool:{tool_name}",
+                importance=5,
+            )
+        except Exception:
+            pass
+    elif _matches_fitness_record(text):
+        try:
+            memory.upsert_memory(
+                "artifact_fitness_path",
+                f"用户的 fit/fitness/体重饮食记录文件路径是 {path}",
+                tags=["artifact", "file", "fit", "fitness", "体重", "饮食", "健身", "health"],
+                type="project",
+                source=f"tool:{tool_name}",
+                importance=5,
+            )
+        except Exception:
+            pass
+
+
+def _bookkeeper_file_candidates() -> list[str]:
+    roots = [settings.workspace_dir, settings.output_dir]
+    patterns = ("*bookkeeper*", "*ledger*", "*记账*", "*账本*")
+    return _file_candidates(roots, patterns)
+
+
+def _fitness_file_candidates() -> list[str]:
+    roots = [settings.workspace_dir, settings.output_dir]
+    patterns = ("*fit*", "*fitness*", "*体重*", "*饮食*", "*健身*")
+    return _file_candidates(roots, patterns)
+
+
+def _file_candidates(roots: list[Path], patterns: tuple[str, ...]) -> list[str]:
+    found: list[Path] = []
+    seen: set[Path] = set()
+    for root in roots:
+        try:
+            base = root.resolve()
+        except Exception:
+            continue
+        if not base.exists():
+            continue
+        for pattern in patterns:
+            try:
+                matches = list(base.rglob(pattern)) if base.is_dir() else []
+            except Exception:
+                matches = []
+            for path in matches:
+                if path.is_file() and path not in seen:
+                    seen.add(path)
+                    found.append(path)
+    found.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
+    return [str(p) for p in found[:5]]
+
+
+def _has_successful_write_file(tool_results: list[dict]) -> bool:
+    for item in tool_results:
+        if item.get("name") != "write_file":
+            continue
+        result = item.get("result")
+        if isinstance(result, dict) and not result.get("error"):
+            return True
+    return False
 
 
 _PERSONA_INSTRUCTIONS = {
@@ -655,7 +1061,10 @@ def _longest_existing_path(segment: str) -> Path | None:
     return None
 
 
-def _sanitize_tool_history(messages: list[dict]) -> list[dict]:
+def _sanitize_tool_history(
+    messages: list[dict],
+    require_reasoning_content: bool = False,
+) -> list[dict]:
     """Drop malformed historical tool-call fragments before sending to providers.
 
     OpenAI requires every assistant message with `tool_calls` to be IMMEDIATELY
@@ -664,6 +1073,11 @@ def _sanitize_tool_history(messages: list[dict]) -> list[dict]:
       - orphan `tool` messages (no preceding assistant with matching id), and
       - assistant `tool_calls` blocks where any matched tool responses are missing
         or are interrupted by another role.
+
+    Some thinking-mode providers also require assistant `tool_calls` messages to
+    replay their `reasoning_content` verbatim in future requests. If old history
+    was saved before that field was persisted, drop the incomplete block instead
+    of sending a request the provider will reject.
     """
     out: list[dict] = []
     # Pending block under construction: (assistant_index_in_out, remaining_ids, partial_tools)
@@ -673,12 +1087,11 @@ def _sanitize_tool_history(messages: list[dict]) -> list[dict]:
 
     def drop_pending() -> None:
         nonlocal pending_assistant_idx, pending_remaining, pending_tool_indices
-        if pending_assistant_idx is None:
-            return
-        # Remove assistant + its partial tool messages from out (in reverse to keep indices stable)
-        to_drop = sorted({pending_assistant_idx, *pending_tool_indices}, reverse=True)
-        for idx in to_drop:
-            del out[idx]
+        if pending_assistant_idx is not None:
+            # Remove assistant + its partial tool messages from out (in reverse to keep indices stable)
+            to_drop = sorted({pending_assistant_idx, *pending_tool_indices}, reverse=True)
+            for idx in to_drop:
+                del out[idx]
         pending_assistant_idx = None
         pending_remaining = set()
         pending_tool_indices = []
@@ -691,10 +1104,17 @@ def _sanitize_tool_history(messages: list[dict]) -> list[dict]:
 
     for msg in messages:
         role = msg.get("role")
+        if role == "assistant" and _contains_dsml_tool_call(msg.get("content") or "") and not msg.get("tool_calls"):
+            continue
         if role == "assistant" and msg.get("tool_calls"):
             # If there's already a half-built block, the previous one was incomplete — drop it.
             if pending_remaining:
                 drop_pending()
+            if require_reasoning_content and not msg.get("reasoning_content"):
+                pending_assistant_idx = None
+                pending_remaining = {tc.get("id") for tc in (msg.get("tool_calls") or []) if tc.get("id")}
+                pending_tool_indices = []
+                continue
             tool_calls = msg.get("tool_calls") or []
             ids = {tc.get("id") for tc in tool_calls if tc.get("id")}
             if not ids:
@@ -707,8 +1127,9 @@ def _sanitize_tool_history(messages: list[dict]) -> list[dict]:
         if role == "tool":
             tool_call_id = msg.get("tool_call_id")
             if tool_call_id and tool_call_id in pending_remaining:
-                out.append(msg)
-                pending_tool_indices.append(len(out) - 1)
+                if pending_assistant_idx is not None:
+                    out.append(msg)
+                    pending_tool_indices.append(len(out) - 1)
                 pending_remaining.discard(tool_call_id)
                 if not pending_remaining:
                     commit_pending()
@@ -723,3 +1144,67 @@ def _sanitize_tool_history(messages: list[dict]) -> list[dict]:
     if pending_remaining:
         drop_pending()
     return out
+
+
+def _requires_reasoning_content_echo(model: str) -> bool:
+    value = (model or settings.model or "").lower()
+    return "deepseek" in value
+
+
+def _contains_dsml_tool_call(content: str) -> bool:
+    return "DSML" in content and "tool_calls" in content and "invoke name=" in content
+
+
+def _strip_dsml_tool_blocks(content: str) -> str:
+    text = _DSML_TOOL_CALLS_RE.sub("", content or "")
+    return text.strip()
+
+
+_DSML_TOOL_CALLS_RE = re.compile(
+    r"<[｜|]\s*[｜|]\s*DSML\s*[｜|]\s*[｜|]\s*tool_calls\s*>.*?"
+    r"</[｜|]\s*[｜|]\s*DSML\s*[｜|]\s*[｜|]\s*tool_calls\s*>",
+    re.S,
+)
+_DSML_INVOKE_RE = re.compile(
+    r"<[｜|]\s*[｜|]\s*DSML\s*[｜|]\s*[｜|]\s*invoke\s+name=\"([^\"]+)\"\s*>"
+    r"(.*?)"
+    r"</[｜|]\s*[｜|]\s*DSML\s*[｜|]\s*[｜|]\s*invoke\s*>",
+    re.S,
+)
+_DSML_PARAM_RE = re.compile(
+    r"<[｜|]\s*[｜|]\s*DSML\s*[｜|]\s*[｜|]\s*parameter\s+name=\"([^\"]+)\"\s+string=\"(true|false)\"\s*>"
+    r"(.*?)"
+    r"</[｜|]\s*[｜|]\s*DSML\s*[｜|]\s*[｜|]\s*parameter\s*>",
+    re.S,
+)
+
+
+def _extract_dsml_tool_calls(content: str, iteration: int = 0) -> list[dict]:
+    if not _contains_dsml_tool_call(content or ""):
+        return []
+    calls: list[dict] = []
+    for idx, match in enumerate(_DSML_INVOKE_RE.finditer(content)):
+        name = match.group(1).strip()
+        body = match.group(2)
+        args: dict = {}
+        for param in _DSML_PARAM_RE.finditer(body):
+            key = param.group(1).strip()
+            is_string = param.group(2) == "true"
+            raw_value = html.unescape(param.group(3).strip())
+            if is_string:
+                args[key] = raw_value
+            else:
+                try:
+                    args[key] = json.loads(raw_value)
+                except Exception:
+                    args[key] = raw_value
+        if name:
+            calls.append({
+                "id": f"call-dsml-{iteration}-{idx}",
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": json.dumps(args, ensure_ascii=False),
+                },
+            })
+    return calls

@@ -44,10 +44,11 @@ class Message(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     session_id = Column(String, index=True)
     role = Column(String)            # system / user / assistant / tool
-    content = Column(Text)           # 文本内容；tool_call/result 走 JSON
+    content = Column(Text)           # 文本内容；list content 走 JSON dump
     tool_calls = Column(Text)        # JSON dump
     tool_call_id = Column(String)
     name = Column(String)            # 工具名
+    reasoning_content = Column(Text, nullable=True)  # Provider thinking/reasoning content that must be replayed for tool calls.
     ts = Column(Float)
 
 
@@ -95,6 +96,13 @@ def _migrate():
         if "confirmed" not in columns:
             conn.execute(text("ALTER TABLE facts ADD COLUMN confirmed INTEGER DEFAULT 1"))
 
+    # messages table migrations
+    if "messages" in inspector.get_table_names():
+        msg_columns = {c["name"] for c in inspector.get_columns("messages")}
+        with _engine.begin() as conn:
+            if "reasoning_content" not in msg_columns:
+                conn.execute(text("ALTER TABLE messages ADD COLUMN reasoning_content TEXT"))
+
 
 # 先迁移再建表（对新表不影响）
 _migrate()
@@ -132,13 +140,22 @@ def _get_episodic():
 
 def append_message(session_id: str, msg: dict) -> int:
     """把一条 OpenAI 风格的消息存到 SQLite，返回 row id。"""
+    content_val = msg.get("content")
+    if isinstance(content_val, list):
+        # Thinking blocks require an API-generated signature to replay.
+        # Extract text parts only so history never contains unrestorable thinking blocks.
+        text_parts = [b.get("text", "") for b in content_val if isinstance(b, dict) and b.get("type") == "text"]
+        content_val = "\n".join(text_parts)
+    elif not content_val:
+        content_val = ""
     row = Message(
         session_id=session_id,
         role=msg.get("role"),
-        content=msg.get("content") or "",
+        content=content_val,
         tool_calls=json.dumps(msg.get("tool_calls")) if msg.get("tool_calls") else None,
         tool_call_id=msg.get("tool_call_id"),
         name=msg.get("name"),
+        reasoning_content=msg.get("reasoning_content") or None,
         ts=time.time(),
     )
     with db_session() as s:
@@ -161,13 +178,15 @@ def load_history(session_id: str, limit: int = 40) -> list[dict]:
         out: list[dict] = []
         for r in rows:
             # _msg_id 是内部字段，用于滚动摘要 covers_until_msg_id 计算；不会发给模型
-            m: dict = {"role": r.role, "content": r.content, "_msg_id": r.id}
+            m: dict = {"role": r.role, "content": r.content or "", "_msg_id": r.id}
             if r.tool_calls:
                 m["tool_calls"] = json.loads(r.tool_calls)
             if r.tool_call_id:
                 m["tool_call_id"] = r.tool_call_id
             if r.name:
                 m["name"] = r.name
+            if r.reasoning_content:
+                m["reasoning_content"] = r.reasoning_content
             out.append(m)
     return out
 
@@ -266,7 +285,7 @@ def search_messages(q: str = "", session_id: Optional[str] = None, limit: int = 
 def remember(
     key: str,
     value: str,
-    tags: Optional[list[str]] = None,
+    tags: Optional[list[str] | str] = None,
     type: str = "project",
     source: str = "explicit",
     importance: int = 3,
@@ -275,7 +294,10 @@ def remember(
 ) -> str:
     """写一条长期事实。同时写 SQLite 和 Chroma。"""
     fact_id = str(uuid.uuid4())
-    tag_str = ",".join(tags or [])
+    if isinstance(tags, str):
+        tag_str = tags
+    else:
+        tag_str = ",".join(tags or [])
     now = time.time()
     with db_session() as s:
         s.add(Fact(
@@ -303,6 +325,43 @@ def remember(
     except Exception as e:
         print(f"[memory] embedding failed, fact stored in SQL only: {e}")
     return fact_id
+
+
+def upsert_memory(
+    key: str,
+    value: str,
+    tags: Optional[list[str] | str] = None,
+    type: str = "project",
+    source: str = "chat",
+    importance: int = 3,
+    confirmed: int = 1,
+) -> str:
+    """Create or update a confirmed fact by key."""
+    if isinstance(tags, str):
+        tag_str = tags
+    else:
+        tag_str = ",".join(tags or [])
+    now = time.time()
+    with db_session() as s:
+        row = s.scalars(select(Fact).where(Fact.key == key).limit(1)).first()
+        if row is not None:
+            row.value = value
+            row.type = type
+            row.source = source
+            row.importance = importance
+            row.tags = tag_str
+            row.confirmed = confirmed
+            row.ts = now
+            return row.id
+    return remember(
+        key=key,
+        value=value,
+        tags=tag_str,
+        type=type,
+        source=source,
+        importance=importance,
+        confirmed=confirmed,
+    )
 
 
 def store_candidate(
@@ -408,8 +467,12 @@ def recall(query: str, top_k: int = 5) -> list[dict]:
         with db_session() as s:
             stmt = (
                 select(Fact)
-                .where(Fact.value.like(f"%{query}%"))
                 .where(Fact.confirmed == 1)
+                .where(
+                    Fact.value.like(f"%{query}%")
+                    | Fact.key.like(f"%{query}%")
+                    | Fact.tags.like(f"%{query}%")
+                )
                 .limit(top_k)
             )
             rows = list(s.scalars(stmt))

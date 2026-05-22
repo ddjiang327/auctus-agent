@@ -120,6 +120,29 @@ class AccountingTests(unittest.TestCase):
         self.assertEqual(post.call_args.kwargs["json"]["model"], "deepseek-chat")
         self.assertEqual(post.call_args.kwargs["headers"]["x-api-key"], "au_test")
 
+    def test_proxy_route_disables_deepseek_thinking_for_tool_calls(self):
+        fake_response = {
+            "model": "deepseek-chat",
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+        }
+        tools = [{
+            "type": "function",
+            "function": {"name": "search_web", "parameters": {"type": "object", "properties": {}}},
+        }]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            settings.data_dir = Path(tmp)
+            db_path = Path(tmp) / "secretary.db"
+            settings.llm_route = "proxy"
+            accounting.set_api_key("auctus_hosted", "au_test", base_url="http://relay.test", path=db_path)
+            with patch("app.accounting.db_path", return_value=db_path):
+                with patch("app.llm.settings.model", "deepseek/deepseek-chat"):
+                    with patch("app.llm.httpx.post", return_value=httpx.Response(200, json=fake_response)) as post:
+                        llm.chat_completion(messages=[{"role": "user", "content": "hi"}], tools=tools)
+
+        self.assertEqual(post.call_args.kwargs["json"]["thinking"], {"type": "disabled"})
+
     def test_daily_cost_report_aggregates_one_day(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "secretary.db"

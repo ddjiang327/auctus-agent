@@ -22,7 +22,7 @@ This roadmap is only for the desktop/local agent.
 - `GET /api/history/search?q=&session_id=` searches messages by keyword.
 - "📜 历史" topbar panel: session list, keyword search, click to load messages.
 
-### Task Mode MVP
+### Task Mode MVP ✅ Done
 
 Goal: make Auctus Agent behave more like a practical assistant for complex tasks without slowing down simple questions.
 
@@ -33,14 +33,6 @@ Goal: make Auctus Agent behave more like a practical assistant for complex tasks
 - The UI shows a subdued side/bottom progress panel with the current step, completed steps, pending steps, and short activity updates.
 - The progress panel shows observable work notes, not hidden chain-of-thought.
 - The first version should support one active task at a time and does not need long-term task history.
-
-Initial implementation steps:
-
-1. Add a task state object with `goal`, `steps`, `current_step`, `activity`, `status`, and optional `artifacts`.
-2. Add prompt instructions for Task Mode: plan first, ask for missing requirements, update progress, then execute.
-3. Add API support for creating, updating, reading, and ending the active task.
-4. Add UI controls for `Quick answer` versus `Task Mode`, plus a light task progress panel.
-5. Test with real examples such as building insurance comparison, laptop selection, travel planning, and simple questions that should remain fast.
 
 ## Done
 

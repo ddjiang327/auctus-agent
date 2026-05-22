@@ -252,7 +252,7 @@ class ToolSafetyTests(unittest.TestCase):
                 tools._DISPATCH["run_terminal_command"] = lambda **kwargs: {"returncode": 0, "command": kwargs["command"]}
                 result = tools.run_tool(
                     "run_terminal_command",
-                    {"command": "mv /Users/david/Desktop/1.md ~/.Trash/"},
+                    {"command": "mv /Users/example/Desktop/1.md ~/.Trash/"},
                     user_input="把 1.md 移到废纸篓/回收站（不要永久删除）。",
                 )
         finally:
@@ -267,7 +267,7 @@ class ToolSafetyTests(unittest.TestCase):
                 tools._DISPATCH["run_terminal_command"] = lambda **kwargs: {"returncode": 0}
                 result = tools.run_tool(
                     "run_terminal_command",
-                    {"command": "rm /Users/david/Desktop/1.md"},
+                    {"command": "rm /Users/example/Desktop/1.md"},
                     user_input="把 1.md 移到废纸篓/回收站（不要永久删除）。",
                 )
         finally:
@@ -295,7 +295,7 @@ class ToolSafetyTests(unittest.TestCase):
         llm_payload = [
             {
                 "key": "User profile",
-                "value": "David，44岁，程序员，住在墨尔本 Oakleigh South",
+                "value": "Alex，44岁，程序员，住在 Example City",
                 "type": "preference",
                 "importance": 4,
             },
@@ -321,7 +321,7 @@ class ToolSafetyTests(unittest.TestCase):
         self.assertEqual(result["candidates"][0]["importance"], 4)
         store.assert_called_once()
         _, kwargs = store.call_args
-        self.assertIn("David", kwargs["value"])
+        self.assertIn("Alex", kwargs["value"])
 
     def test_write_file_allows_workspace_text_file(self):
         result = tools.write_file("notes/todo.md", "hello")
