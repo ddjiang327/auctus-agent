@@ -1,0 +1,244 @@
+name: Release Auctus Agent (Windows)
+
+# Triggers
+#   - Tag push  : v0.1.38, v0.2.0-beta, etc.  → builds, signs (when enabled), publishes a GitHub Release
+#   - Manual run: workflow_dispatch          → builds and uploads as workflow artifact (no Release)
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Override version (e.g. 0.1.38). Leave blank to read from app/version.py.'
+        required: false
+        default: ''
+
+permissions:
+  contents: write   # softprops/action-gh-release needs this to attach assets to a release
+  id-token: write  # reserved for SignPath OIDC (currently unused; safe to keep)
+
+jobs:
+  build-windows:
+    name: Build Windows standalone
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Determine version
+        id: version
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF -match '^refs/tags/v(.+)$') {
+            $version = $matches[1]
+          } elseif ('${{ github.event.inputs.version }}' -ne '') {
+            $version = '${{ github.event.inputs.version }}'
+          } else {
+            $version = python -c "import sys; sys.path.insert(0,'app'); from version import APP_VERSION; print(APP_VERSION)"
+          }
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "Building Auctus Agent v$version"
+
+      - name: Install dependencies & PyInstaller
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install -r requirements-desktop.txt
+          python -m pip install pyinstaller
+
+      - name: Run PyInstaller
+        shell: pwsh
+        run: |
+          pyinstaller auctus-agent.spec --clean --noconfirm
+
+      - name: Verify unsigned .exe exists
+        shell: pwsh
+        run: |
+          $exe = 'dist\AuctusAgent\AuctusAgent.exe'
+          if (-not (Test-Path $exe)) { throw "PyInstaller did not produce $exe" }
+          $size = (Get-Item $exe).Length
+          Write-Host ("Unsigned .exe size: {0:N0} bytes" -f $size)
+
+      - name: Upload unsigned .exe as workflow artifact
+        id: upload-unsigned-exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: AuctusAgent-unsigned-v${{ steps.version.outputs.version }}
+          path: dist/AuctusAgent/AuctusAgent.exe
+          retention-days: 7
+
+      # =====================================================================
+      # SignPath code-signing — DISABLED until SignPath Foundation approves
+      # the project. To enable:
+      #   1. Once SignPath approval email arrives, in the SignPath dashboard:
+      #        - Create an API token (Settings → API Tokens)
+      #        - Note your Organization ID
+      #        - Configure a Project (slug: e.g. auctus-agent)
+      #        - Configure a Signing Policy (slug: e.g. release-signing)
+      #        - Configure an Artifact Configuration (slug: e.g. exe-default)
+      #   2. In this GitHub repo:
+      #        - Secret:    SIGNPATH_API_TOKEN     (value from step 1)
+      #        - Variable:  SIGNPATH_ORG_ID         (UUID from step 1)
+      #        - Variable:  SIGNPATH_PROJECT_SLUG   (e.g. auctus-agent)
+      #        - Variable:  SIGNPATH_POLICY_SLUG    (e.g. release-signing)
+      #        - Variable:  SIGNPATH_ARTIFACT_SLUG  (e.g. exe-default)
+      #   3. Remove the `#` from each line of the two blocks below.
+      # Until enabled, releases ship UNSIGNED (current state).
+      # =====================================================================
+      #
+      # - name: Submit signing request to SignPath
+      #   id: signpath
+      #   uses: signpath/github-action-submit-signing-request@v1
+      #   with:
+      #     api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+      #     organization-id: ${{ vars.SIGNPATH_ORG_ID }}
+      #     project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+      #     signing-policy-slug: ${{ vars.SIGNPATH_POLICY_SLUG }}
+      #     artifact-configuration-slug: ${{ vars.SIGNPATH_ARTIFACT_SLUG }}
+      #     github-artifact-id: ${{ steps.upload-unsigned-exe.outputs.artifact-id }}
+      #     wait-for-completion: true
+      #     output-artifact-directory: signed-artifacts/
+      #
+      # - name: Replace unsigned .exe with signed .exe
+      #   shell: pwsh
+      #   run: |
+      #     $signed = 'signed-artifacts\AuctusAgent.exe'
+      #     if (-not (Test-Path $signed)) { throw "SignPath did not return a signed .exe at $signed" }
+      #     Copy-Item -Force $signed 'dist\AuctusAgent\AuctusAgent.exe'
+      #     Write-Host "Signed .exe installed in dist/AuctusAgent/"
+
+      - name: Stage standalone bundle
+        shell: pwsh
+        run: |
+          $version = '${{ steps.version.outputs.version }}'
+          $outDir  = "release\Auctus-Agent-win-v$version"
+
+          if (Test-Path $outDir) { Remove-Item -Recurse -Force $outDir }
+          New-Item -ItemType Directory -Force -Path "$outDir\_app" | Out-Null
+
+          Copy-Item -Recurse "dist\AuctusAgent\*" "$outDir\_app\"
+          Copy-Item ".env.example"                "$outDir\_app\"
+          New-Item -ItemType Directory -Force -Path "$outDir\_app\prompts" | Out-Null
+          Copy-Item "prompts\system.md"           "$outDir\_app\prompts\"
+
+      - name: Write launcher (Launch Auctus Agent.bat)
+        shell: pwsh
+        run: |
+          $version = '${{ steps.version.outputs.version }}'
+          $outDir  = "release\Auctus-Agent-win-v$version"
+          $launcherPath = "$outDir\Launch Auctus Agent.bat"
+
+          # Keep this in sync with scripts/build_pyinstaller_win.ps1
+          $launcher = @'
+          @echo off
+          setlocal
+          cd /d "%~dp0_app"
+
+          echo ================================================
+          echo   Auctus Agent
+          echo ================================================
+          echo.
+
+          curl -fsS http://127.0.0.1:8000/healthz >nul 2>&1
+          if %errorlevel% == 0 (
+              echo Auctus Agent is already running.
+              start http://127.0.0.1:8000/
+              echo You can close this window.
+              timeout /t 3 >nul
+              exit /b 0
+          )
+
+          if not exist data    mkdir data
+          if not exist inputs  mkdir inputs
+          if not exist outputs mkdir outputs
+          if not exist logs    mkdir logs
+          if not exist .env    copy .env.example .env >nul
+
+          echo Starting Auctus Agent...
+          echo Logs: %CD%\logs\startup.log
+          echo.
+
+          start /B "" AuctusAgent.exe
+
+          set /a tries=0
+          :wait_loop
+          if %tries% geq 60 (
+              echo.
+              echo ERROR: Server did not start within 60 seconds.
+              echo Check logs\startup.log for details.
+              pause
+              exit /b 1
+          )
+          timeout /t 1 >nul
+          curl -fsS http://127.0.0.1:8000/healthz >nul 2>&1
+          if %errorlevel% == 0 goto ready
+          set /a tries=%tries%+1
+          <nul set /p ="."
+          goto wait_loop
+
+          :ready
+          echo.
+          echo Auctus Agent is ready at http://127.0.0.1:8000
+          echo Opening browser...
+          start http://127.0.0.1:8000/
+          echo.
+          echo You can close this window. Auctus Agent will keep running in the background.
+          timeout /t 4 >nul
+          exit /b 0
+          '@
+          [System.IO.File]::WriteAllText($launcherPath, $launcher, [System.Text.Encoding]::ASCII)
+          Write-Host "Wrote launcher: $launcherPath"
+
+      - name: Create release ZIP
+        id: zip
+        shell: pwsh
+        run: |
+          $version = '${{ steps.version.outputs.version }}'
+          $folder  = "release\Auctus-Agent-win-v$version"
+          $zipPath = "release\Auctus-Agent-win-standalone-v$version.zip"
+
+          if (Test-Path $zipPath) { Remove-Item $zipPath }
+          Compress-Archive -Path $folder -DestinationPath $zipPath
+
+          $sizeMB = [math]::Round((Get-Item $zipPath).Length / 1MB, 1)
+          Write-Host "ZIP: $zipPath ($sizeMB MB)"
+          "zip-path=$zipPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Upload release ZIP as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Auctus-Agent-win-standalone-v${{ steps.version.outputs.version }}
+          path: ${{ steps.zip.outputs.zip-path }}
+          retention-days: 30
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.zip.outputs.zip-path }}
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.version, '-') }}
+          generate_release_notes: true
+          body: |
+            ## Auctus Agent v${{ steps.version.outputs.version }}
+
+            Standalone Windows build — no Python install required.
+
+            **First-run security warnings:** see the [Code Signing Policy](https://leyou.studio/code-signing/index.html) for instructions on unblocking Windows SmartScreen.
+
+            ### Verify the signature (once SignPath is enabled)
+            ```powershell
+            Get-AuthenticodeSignature .\AuctusAgent.exe | Format-List
+            ```
