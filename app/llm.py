@@ -4,7 +4,10 @@
 """
 from __future__ import annotations
 
-from typing import Any, Iterable, Optional
+import json
+import threading
+from collections import OrderedDict
+from typing import Any, Iterable, Iterator, Optional
 
 import httpx
 import litellm
@@ -116,6 +119,120 @@ def _proxy_chat_completion(
     return data
 
 
+def chat_completion_stream(
+    messages: list[dict[str, Any]],
+    tools: Optional[list[dict[str, Any]]] = None,
+    temperature: float = 0.2,
+    model: str = "",
+) -> Iterator[dict[str, Any]]:
+    """流式版本的 chat_completion。
+
+    迭代产出 OpenAI 兼容的 delta chunk：
+        {"choices": [{"delta": {"content": "...", "tool_calls": [...]},
+                      "finish_reason": "stop"|"tool_calls"|None}], ...}
+    最后一个 chunk 可能附带 "usage"（用于记账）。
+    """
+    effective_model = model or settings.model
+    if accounting.current_route() == "proxy":
+        yield from _proxy_chat_completion_stream(
+            messages=messages, tools=tools, temperature=temperature, model=effective_model
+        )
+        return
+
+    kwargs: dict[str, Any] = {
+        "model": effective_model,
+        "messages": messages,
+        "temperature": temperature,
+        "stream": True,
+        "stream_options": {"include_usage": True},
+    }
+    kwargs.update(_route_kwargs(effective_model))
+    if tools:
+        kwargs["tools"] = tools
+        kwargs["tool_choice"] = "auto"
+
+    final_usage: dict[str, Any] = {}
+    final_model = effective_model
+    final_cost: Optional[float] = None
+
+    for chunk in litellm.completion(**kwargs):
+        data = chunk.model_dump() if hasattr(chunk, "model_dump") else dict(chunk)
+        if data.get("usage"):
+            final_usage = data["usage"]
+        if data.get("model"):
+            final_model = data["model"]
+        if data.get("response_cost"):
+            final_cost = data["response_cost"]
+        yield data
+
+    if final_usage:
+        accounting.record_model_call(model=final_model, usage=final_usage, cost=final_cost)
+
+
+def _proxy_chat_completion_stream(
+    messages: list[dict[str, Any]],
+    tools: Optional[list[dict[str, Any]]] = None,
+    temperature: float = 0.2,
+    model: str = "",
+) -> Iterator[dict[str, Any]]:
+    effective_model = model or settings.model
+    endpoint, api_key = _proxy_endpoint_and_key()
+    body: dict[str, Any] = {
+        "model": _relay_model_id(effective_model),
+        "messages": messages,
+        "temperature": temperature,
+        "stream": True,
+        "stream_options": {"include_usage": True},
+    }
+    if tools:
+        body["tools"] = tools
+        body["tool_choice"] = "auto"
+        if _is_deepseek_model(body["model"]):
+            body["thinking"] = {"type": "disabled"}
+
+    final_usage: dict[str, Any] = {}
+    final_model = effective_model
+    final_cost: Optional[float] = None
+
+    with httpx.stream(
+        "POST",
+        f"{endpoint}/chat/completions",
+        json=body,
+        headers={
+            "x-api-key": api_key,
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        timeout=120.0,
+    ) as response:
+        if response.status_code >= 400:
+            content = response.read()
+            raise RuntimeError(
+                f"Proxy relay error: {response.status_code} - {content.decode('utf-8', 'replace')[:500]}"
+            )
+        for raw_line in response.iter_lines():
+            line = raw_line.strip() if isinstance(raw_line, str) else raw_line.decode("utf-8", "replace").strip()
+            if not line or not line.startswith("data:"):
+                continue
+            payload = line[5:].strip()
+            if payload == "[DONE]":
+                break
+            try:
+                data = json.loads(payload)
+            except Exception:
+                continue
+            if data.get("usage"):
+                final_usage = data["usage"]
+            if data.get("model"):
+                final_model = data["model"]
+            if data.get("response_cost"):
+                final_cost = data["response_cost"]
+            yield data
+
+    if final_usage:
+        accounting.record_model_call(model=final_model, usage=final_usage, cost=final_cost)
+
+
 def _proxy_endpoint_and_key() -> tuple[str, str]:
     hosted = accounting.get_api_key_with_metadata("auctus_hosted")
     if hosted:
@@ -129,21 +246,65 @@ def _proxy_endpoint_and_key() -> tuple[str, str]:
     return settings.proxy_base_url.rstrip("/"), api_key
 
 
+_EMBED_CACHE_MAX = 512
+_embed_cache: "OrderedDict[tuple[str, str], list[float]]" = OrderedDict()
+_embed_cache_lock = threading.Lock()
+
+
+def _embed_cache_get(model: str, text: str) -> Optional[list[float]]:
+    key = (model, text)
+    with _embed_cache_lock:
+        vec = _embed_cache.get(key)
+        if vec is not None:
+            _embed_cache.move_to_end(key)
+        return vec
+
+
+def _embed_cache_put(model: str, text: str, vec: list[float]) -> None:
+    key = (model, text)
+    with _embed_cache_lock:
+        _embed_cache[key] = vec
+        _embed_cache.move_to_end(key)
+        while len(_embed_cache) > _EMBED_CACHE_MAX:
+            _embed_cache.popitem(last=False)
+
+
 def embed(texts: Iterable[str]) -> list[list[float]]:
-    """生成嵌入向量。统一走 LiteLLM。"""
+    """生成嵌入向量。统一走 LiteLLM。带 (model, text) -> vector 的 LRU 缓存。"""
     texts = list(texts)
     if not texts:
         return []
-    kwargs: dict[str, Any] = {"model": settings.embedding_model, "input": texts}
-    kwargs.update(_route_kwargs(settings.embedding_model))
+    model = settings.embedding_model
+
+    # 先查缓存
+    results: list[Optional[list[float]]] = [None] * len(texts)
+    misses: list[tuple[int, str]] = []
+    for i, t in enumerate(texts):
+        cached = _embed_cache_get(model, t)
+        if cached is not None:
+            results[i] = cached
+        else:
+            misses.append((i, t))
+
+    if not misses:
+        return [v for v in results if v is not None]  # type: ignore[misc]
+
+    # 只对未命中的 text 调 API
+    miss_texts = [t for _, t in misses]
+    kwargs: dict[str, Any] = {"model": model, "input": miss_texts}
+    kwargs.update(_route_kwargs(model))
     resp = litellm.embedding(**kwargs)
     data = resp.model_dump() if hasattr(resp, "model_dump") else dict(resp)
     accounting.record_model_call(
-        model=data.get("model", settings.embedding_model),
+        model=data.get("model", model),
         usage=data.get("usage") or {},
         cost=data.get("response_cost"),
     )
-    return [item["embedding"] for item in data["data"]]
+    miss_vectors = [item["embedding"] for item in data["data"]]
+    for (orig_idx, text), vec in zip(misses, miss_vectors):
+        results[orig_idx] = vec
+        _embed_cache_put(model, text, vec)
+    return [v for v in results if v is not None]  # type: ignore[misc]
 
 
 def _route_kwargs(model: str) -> dict[str, Any]:

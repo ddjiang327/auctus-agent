@@ -12,6 +12,7 @@ Phase 2 增强：
 from __future__ import annotations
 
 import json
+import threading
 import time
 import uuid
 from contextlib import contextmanager
@@ -628,6 +629,133 @@ def summarize_and_truncate(
         {"role": "system", "content": f"[历史会话摘要]\n{summary_text}"},
         *_strip(to_keep),
     ]
+
+
+# ---------- 后台压缩：每轮不阻塞 ----------
+
+_compact_lock = threading.Lock()
+_compact_in_progress: set[str] = set()
+
+
+def _strip_msg_id(msgs: list[dict]) -> list[dict]:
+    out: list[dict] = []
+    for m in msgs:
+        if "_msg_id" in m:
+            mm = dict(m)
+            mm.pop("_msg_id", None)
+            out.append(mm)
+        else:
+            out.append(m)
+    return out
+
+
+def prepare_history_for_turn(
+    session_id: str,
+    all_messages: list[dict],
+    keep_recent: int = 12,
+    token_budget: int = 8000,
+) -> list[dict]:
+    """非阻塞版的 summarize_and_truncate。
+
+    用已有的滚动摘要 + 最近 N 条消息；如果还超预算，丢掉最早的未摘要消息，
+    但不在本轮做 LLM 调用。如果检测到需要压缩，触发 compact_session_async()
+    在后台异步更新摘要，下一轮再用上。
+    """
+    summary_meta = latest_summary_meta(session_id)
+    existing_summary = (summary_meta or {}).get("content") if summary_meta else ""
+    covers_until = int((summary_meta or {}).get("covers_until_msg_id") or 0)
+
+    min_msg_id: Optional[int] = None
+    for m in all_messages:
+        mid = m.get("_msg_id")
+        if isinstance(mid, int):
+            min_msg_id = mid if min_msg_id is None else min(min_msg_id, mid)
+
+    under_budget = len(all_messages) <= keep_recent + 2 and _estimate_tokens(all_messages) <= token_budget
+    if under_budget:
+        if existing_summary and min_msg_id is not None and covers_until and covers_until < min_msg_id:
+            return [{"role": "system", "content": f"[历史会话摘要]\n{existing_summary}"}, *_strip_msg_id(all_messages)]
+        return _strip_msg_id(all_messages)
+
+    # 超预算：用已有摘要 + 最近的未摘要消息，必要时丢最早的几条
+    unsummarized = [m for m in all_messages if isinstance(m.get("_msg_id"), int) and m["_msg_id"] > covers_until]
+    kept = unsummarized[-keep_recent:] if len(unsummarized) > keep_recent else list(unsummarized)
+    while _estimate_tokens(kept) > token_budget and len(kept) > 4:
+        kept.pop(0)
+    out = _strip_msg_id(kept)
+
+    # 后台异步压缩，下一轮就有更新过的摘要可用
+    compact_session_async(session_id, keep_recent=keep_recent, token_budget=token_budget)
+
+    if existing_summary:
+        return [{"role": "system", "content": f"[历史会话摘要]\n{existing_summary}"}, *out]
+    return out
+
+
+def compact_session_async(
+    session_id: str,
+    keep_recent: int = 12,
+    token_budget: int = 8000,
+) -> None:
+    """调度一次后台压缩。同一 session 已在跑则跳过。"""
+    with _compact_lock:
+        if session_id in _compact_in_progress:
+            return
+        _compact_in_progress.add(session_id)
+
+    def _worker() -> None:
+        try:
+            _compact_session_sync(session_id, keep_recent=keep_recent, token_budget=token_budget)
+        except Exception as exc:
+            print(f"[memory] background compact failed for {session_id}: {exc}")
+        finally:
+            with _compact_lock:
+                _compact_in_progress.discard(session_id)
+
+    threading.Thread(target=_worker, daemon=True, name=f"memory-compact-{session_id}").start()
+
+
+def _compact_session_sync(
+    session_id: str,
+    keep_recent: int = 12,
+    token_budget: int = 8000,
+) -> None:
+    """同步执行一次压缩 —— 跟 summarize_and_truncate 的慢路径等价，但只更新摘要表。"""
+    from . import llm  # 延迟导入避免循环
+
+    all_messages = load_history(session_id, limit=40)
+    if not all_messages:
+        return
+    summary_meta = latest_summary_meta(session_id)
+    existing_summary = (summary_meta or {}).get("content") if summary_meta else ""
+    covers_until = int((summary_meta or {}).get("covers_until_msg_id") or 0)
+
+    needs_compact = not (len(all_messages) <= keep_recent + 2 and _estimate_tokens(all_messages) <= token_budget)
+    if not needs_compact:
+        return
+
+    unsummarized = [m for m in all_messages if isinstance(m.get("_msg_id"), int) and m["_msg_id"] > covers_until]
+    if len(unsummarized) <= keep_recent:
+        return
+
+    to_compress = unsummarized[:-keep_recent]
+    if not to_compress:
+        return
+    new_covers_until = int(to_compress[-1].get("_msg_id") or covers_until)
+
+    new_conv = "\n".join(
+        f"{m['role']}: {m.get('content','')[:400]}" for m in to_compress if m.get("content")
+    )
+    if existing_summary:
+        context = f"已有摘要（覆盖到消息 {covers_until}）：\n{existing_summary}\n\n新增对话（请合并进摘要）：\n{new_conv}"
+    else:
+        context = f"要压缩的对话：\n{new_conv}"
+    resp = llm.chat_completion(
+        messages=[{"role": "user", "content": SUMMARIZE_PROMPT.format(context=context)}],
+        temperature=0.2,
+    )
+    summary_text = resp["choices"][0]["message"]["content"]
+    write_summary(session_id, summary_text, covers_until_msg_id=new_covers_until)
 
 
 # ---------- Sleep-time 压缩 ----------

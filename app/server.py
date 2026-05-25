@@ -14,7 +14,7 @@ from typing import Optional
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 import litellm
 from pydantic import BaseModel
@@ -2612,6 +2612,308 @@ def chat(body: ChatIn) -> ChatOut:
     runtime_state.set_state(sid, "idle", "chat_completed")
     _schedule_post_turn_review(sid, body.message, reply, files)
     return ChatOut(session_id=sid, reply=reply, files=files, task=active_task)
+
+
+def _sse_event(event_type: str, data: dict) -> str:
+    """Format a single Server-Sent Event."""
+    payload = json.dumps(data, ensure_ascii=False, default=str)
+    return f"event: {event_type}\ndata: {payload}\n\n"
+
+
+def _pin_generator_to_context(gen_factory):
+    """把 sync 生成器整体绑死到一个固定 Context 里运行。
+
+    Starlette/FastAPI 的 StreamingResponse 会用 iterate_in_threadpool +
+    anyio.to_thread.run_sync 来迭代 sync 生成器；后者对每次 next() 都做
+    contextvars.copy_context()，导致 generator 内部的 `with` 块（基于 ContextVar.set
+    + reset(token)）跨 next() 调用时 token 不属于当前 context → 抛
+    "Token was created in a different Context"。
+
+    本工具把生成器丢到一个专用 daemon 线程里，使用一份 copy_context() 跑到结束，
+    主线程通过 queue 取值并 re-yield。这样 ContextVar 的 set/reset 全部发生在
+    同一个 Context 里。
+    """
+    import contextvars
+    import queue
+    import threading
+
+    sentinel = object()
+
+    class _Err:
+        __slots__ = ("exc",)
+
+        def __init__(self, exc: BaseException) -> None:
+            self.exc = exc
+
+    q: "queue.Queue[object]" = queue.Queue(maxsize=64)
+    cancel_event = threading.Event()
+
+    def _producer() -> None:
+        gen = None
+        try:
+            gen = gen_factory()
+            for item in gen:
+                # Put with timeout so we can periodically check cancel_event.
+                # If consumer disappeared (client disconnect), the queue fills
+                # and we bail out instead of holding the LLM connection forever.
+                while True:
+                    if cancel_event.is_set():
+                        return
+                    try:
+                        q.put(item, timeout=0.5)
+                        break
+                    except queue.Full:
+                        continue
+        except BaseException as exc:  # noqa: BLE001
+            try:
+                q.put(_Err(exc), timeout=0.5)
+            except queue.Full:
+                pass
+        finally:
+            if gen is not None and cancel_event.is_set():
+                # Let the inner generator unwind its `with` blocks cleanly
+                # (reset ContextVars, close LLM stream).
+                try:
+                    gen.close()
+                except Exception:
+                    pass
+            try:
+                q.put(sentinel, timeout=0.5)
+            except queue.Full:
+                pass
+
+    ctx = contextvars.copy_context()
+    threading.Thread(
+        target=ctx.run, args=(_producer,), daemon=True, name="sse-producer"
+    ).start()
+
+    def _consumer():
+        try:
+            while True:
+                item = q.get()
+                if item is sentinel:
+                    return
+                if isinstance(item, _Err):
+                    raise item.exc
+                yield item
+        finally:
+            # Fires when starlette closes the streaming response (client
+            # disconnect / abort) — signal the producer to unwind cleanly.
+            cancel_event.set()
+
+    return _consumer()
+
+
+@app.post("/api/chat/stream")
+def chat_stream_endpoint(body: ChatIn):
+    """Streaming version of /api/chat. Returns SSE events:
+      event: meta       — {session_id, task}
+      event: text       — {delta}
+      event: tool_start — {name, activity}
+      event: tool_end   — {name, ok}
+      event: end        — {session_id, reply, files, task}
+      event: error      — {message}
+      event: permission_request — {type, message, options}  (if pre-check requires it)
+    """
+    from contextlib import ExitStack
+
+    if not body.message.strip():
+        raise HTTPException(400, "empty message")
+    state = accounting.get_setup_state()
+    if state.get("onboarding_mode"):
+        _restore_route_from_onboarding_mode(state["onboarding_mode"])
+    sid = body.session_id or f"web-{uuid.uuid4().hex[:8]}"
+    file_permission = _normalize_file_permission(body.file_permission)
+    calendar_permission = _normalize_calendar_permission(body.calendar_permission)
+    terminal_permission = _normalize_terminal_permission(body.terminal_permission)
+    active_task = task_mode.create_or_resume(sid, body.message) if body.task_mode else None
+    plan_only_task_turn = bool(
+        active_task
+        and int(active_task.get("current_step") or 0) == 0
+        and len(active_task.get("activity") or []) <= 2
+    )
+
+    # Permission gates: serialize as a single-shot SSE stream so the UI can use the same reader.
+    def _single_event_stream(event_type: str, data: dict):
+        yield _sse_event("meta", {"session_id": sid, "task": active_task})
+        yield _sse_event(event_type, data)
+        yield _sse_event("end", {
+            "session_id": sid,
+            "reply": data.get("reply", ""),
+            "files": [],
+            "task": active_task,
+        })
+
+    if _should_request_file_permission(body.message, file_permission):
+        runtime_state.set_state(sid, "waiting_for_user", "waiting_for_file_permission", permission="files")
+        return StreamingResponse(
+            _single_event_stream("permission_request", {
+                "type": "files",
+                "message": "这个任务需要访问你电脑上的文件（可能超出当前授权 workspace）。是否临时授权本次访问？",
+                "options": ["once", "always", "no"],
+            }),
+            media_type="text/event-stream",
+        )
+    if _should_request_calendar_permission(body.message, calendar_permission):
+        runtime_state.set_state(sid, "waiting_for_user", "waiting_for_calendar_permission", permission="calendar")
+        return StreamingResponse(
+            _single_event_stream("permission_request", {
+                "type": "calendar",
+                "message": "这个任务需要访问系统日历/提醒事项。是否授权？（如果你不希望我直接写入日历，我也可以生成 .ics 文件供你导入）",
+                "options": ["once", "always", "no"],
+            }),
+            media_type="text/event-stream",
+        )
+    if _should_request_terminal_permission(body.message, terminal_permission):
+        runtime_state.set_state(sid, "waiting_for_user", "waiting_for_terminal_permission", permission="terminal")
+        return StreamingResponse(
+            _single_event_stream("permission_request", {
+                "type": "terminal",
+                "message": "这个任务需要执行终端命令。是否授权？",
+                "options": ["once", "always", "no"],
+            }),
+            media_type="text/event-stream",
+        )
+    if calendar_permission == "no":
+        runtime_state.set_state(sid, "blocked", "calendar_permission_denied")
+        return StreamingResponse(
+            _single_event_stream("text", {
+                "delta": "好的，这次我不访问系统日历/提醒事项。如果你愿意，我可以帮你生成一个 .ics 文件，你导入到日历即可。",
+                "reply": "好的，这次我不访问系统日历/提醒事项。如果你愿意，我可以帮你生成一个 .ics 文件，你导入到日历即可。",
+            }),
+            media_type="text/event-stream",
+        )
+    if terminal_permission == "no":
+        runtime_state.set_state(sid, "blocked", "terminal_permission_denied")
+        return StreamingResponse(
+            _single_event_stream("text", {"delta": "好的，这次不执行终端命令。", "reply": "好的，这次不执行终端命令。"}),
+            media_type="text/event-stream",
+        )
+    if file_permission == "no":
+        runtime_state.set_state(sid, "blocked", "file_permission_denied")
+        denial = (
+            "好的，这次我不访问 workspace 之外的文件。\n"
+            "你可以：\n"
+            "- 把目标文件复制/移动到当前 workspace 后再让我处理；或\n"
+            "- 在设置里把“文件权限范围”改为“整台电脑”，再重试。"
+        )
+        return StreamingResponse(
+            _single_event_stream("text", {"delta": denial, "reply": denial}),
+            media_type="text/event-stream",
+        )
+
+    session_control.request_stop(sid)
+    lock = session_control.get_lock(sid)
+    acquired = lock.acquire(timeout=60)
+    if not acquired:
+        raise HTTPException(503, "上一条任务仍在执行中，60 秒内未能停止。请稍后重试，或重启 Auctus Agent。")
+
+    runtime_state.set_state(sid, "running", "chat_started")
+    session_control.reset_stop(sid)
+    message = body.message
+    file_scope_override = None
+    if file_permission in {"once", "always"}:
+        if file_permission == "always":
+            accounting.set_setup_state({"permission_scope": "full_computer"})
+        else:
+            file_scope_override = "full_computer"
+        message = (
+            f"【已授权：文件访问={file_permission}】\n"
+            "如果需要访问 workspace 外的文件，现在可以读取/写入支持的文本文件；高风险操作仍需终端权限。\n\n"
+            + message
+        )
+    if calendar_permission in {"once", "always"}:
+        if calendar_permission == "always":
+            accounting.set_setup_state({"calendar_access": "enabled"})
+        message = (
+            f"【已授权：日历访问={calendar_permission}】\n"
+            "如果你无法直接写入系统日历，请生成可导入的 .ics 文件（周五早上“加油”提醒），并告诉用户如何导入。\n\n"
+            + message
+        )
+    if accounting.get_setup_state().get("auto_model") and accounting.current_route() == "proxy":
+        settings.model = _auto_pick_model(message)
+
+    task_context = None
+    quick_without_tools = False
+    if active_task:
+        task_mode.mark_working(sid, "Agent 正在按任务清单推进")
+        task_context = task_mode.prompt_context(active_task)
+        if plan_only_task_turn:
+            task_context += (
+                "\n[本轮执行限制]\n"
+                "这是新任务的第一轮。不要调用工具，不要搜索网页。"
+                "只输出任务清单、当前步骤、已知信息、最多 3 个关键问题和下一步。"
+            )
+    else:
+        task_context = _quick_answer_context()
+        quick_without_tools = _should_quick_answer_without_tools(message)
+
+    if terminal_permission in {"once", "always"}:
+        if terminal_permission == "always":
+            accounting.set_setup_state({"terminal_access": "enabled"})
+        message = (
+            f"【已授权：终端命令={terminal_permission}】\n"
+            "你可以调用 run_terminal_command 执行短命令，或调用 terminal_session_start/send/stop 管理长期终端任务；高风险终端工具参数里务必包含 confirmed:true。\n"
+            "删除类操作默认必须“移到废纸篓/回收站（可恢复）”，不要直接 rm；只有用户明确要求“永久/彻底删除”时才允许 rm。\n\n"
+            + message
+        )
+
+    allow_tools_flag = (not plan_only_task_turn and not quick_without_tools)
+
+    def event_generator():
+        accumulated_reply: list[str] = []
+        files_produced: list[str] = []
+        stopped = False
+        try:
+            yield _sse_event("meta", {"session_id": sid, "task": active_task})
+
+            with ExitStack() as stack:
+                if terminal_permission in {"once", "always"}:
+                    stack.enter_context(tools.terminal_access_override("enabled"))
+                if file_scope_override:
+                    stack.enter_context(tools.permission_scope_override(file_scope_override))
+                stream = agent.chat_stream(
+                    sid, message,
+                    extra_system_context=task_context,
+                    allow_tools=allow_tools_flag,
+                )
+                for event in stream:
+                    etype = event.get("type")
+                    data = {k: v for k, v in event.items() if k != "type"}
+                    if etype == "done":
+                        accumulated_reply.append(event.get("reply", ""))
+                        files_produced.extend(event.get("files", []))
+                    elif etype == "stopped":
+                        stopped = True
+                        accumulated_reply.append(event.get("reply", ""))
+                        files_produced.extend(event.get("files", []))
+                    yield _sse_event(etype or "text", data)
+
+            reply = accumulated_reply[0] if accumulated_reply else ""
+            updated_task = active_task
+            if active_task:
+                updated_task = task_mode.mark_after_reply(sid, reply) or active_task
+                reply = task_mode.strip_update_markers(reply)
+            files = [_file_url(p) for p in files_produced]
+            runtime_state.set_state(sid, "idle" if not stopped else "blocked", "chat_completed" if not stopped else "stopped")
+            _schedule_post_turn_review(sid, body.message, reply, files)
+            yield _sse_event("end", {
+                "session_id": sid,
+                "reply": reply,
+                "files": files,
+                "task": updated_task,
+                "stopped": stopped,
+            })
+        except Exception as exc:
+            runtime_state.set_state(sid, "blocked", "runtime_error")
+            yield _sse_event("error", {"message": _friendly_runtime_error(str(exc))})
+        finally:
+            lock.release()
+
+    return StreamingResponse(
+        _pin_generator_to_context(event_generator),
+        media_type="text/event-stream",
+    )
 
 
 @app.get("/api/task/{session_id}")

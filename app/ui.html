@@ -481,6 +481,58 @@
     .bubble.agent{
       position:relative;
     }
+    /* When agent bubble has rendered markdown, drop the literal whitespace preservation. */
+    .bubble.markdown{ white-space: normal; }
+    .bubble.markdown p{ margin: 0 0 .6em; }
+    .bubble.markdown p:last-child{ margin-bottom: 0; }
+    .bubble.markdown h1, .bubble.markdown h2, .bubble.markdown h3,
+    .bubble.markdown h4, .bubble.markdown h5, .bubble.markdown h6{
+      margin:.4em 0 .3em; font-weight:600; line-height:1.3;
+    }
+    .bubble.markdown h1{ font-size:1.25em }
+    .bubble.markdown h2{ font-size:1.15em }
+    .bubble.markdown h3{ font-size:1.05em }
+    .bubble.markdown ul, .bubble.markdown ol{ margin:.2em 0 .6em; padding-left: 1.4em; }
+    .bubble.markdown li{ margin:.15em 0; }
+    .bubble.markdown blockquote{
+      margin:.4em 0; padding:.3em .8em; border-left:3px solid rgba(255,255,255,.18);
+      color: var(--text-2); background: rgba(255,255,255,.03); border-radius: 4px;
+    }
+    .bubble.markdown code{
+      background: rgba(255,255,255,.07); padding: 1px 5px; border-radius: 4px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .9em;
+    }
+    .bubble.markdown pre{
+      background: rgba(0,0,0,.35); border:1px solid rgba(255,255,255,.06);
+      border-radius: 6px; padding: .6em .8em; margin:.5em 0; overflow:auto;
+      white-space: pre;
+    }
+    .bubble.markdown pre code{ background:transparent; padding:0; }
+    .bubble.markdown table{
+      border-collapse: collapse; margin:.5em 0; font-size: .92em;
+      background: rgba(255,255,255,.03); border-radius: 4px; overflow:hidden;
+    }
+    .bubble.markdown th, .bubble.markdown td{
+      border:1px solid rgba(255,255,255,.10); padding: 4px 8px; text-align:left;
+    }
+    .bubble.markdown th{ background: rgba(255,255,255,.05); font-weight: 600; }
+    .bubble.markdown a{ color: var(--primary, #3aa8ff); text-decoration: underline; }
+    .bubble.markdown hr{
+      border:0; border-top:1px solid rgba(255,255,255,.10); margin:.6em 0;
+    }
+    /* "Thinking..." typing indicator shown before the first token arrives. */
+    .typing-dots{ display:inline-flex; gap:4px; align-items:center; padding:2px 0; }
+    .typing-dots > span{
+      width:6px; height:6px; border-radius:50%;
+      background: rgba(255,255,255,.55);
+      animation: typing-bounce 1.2s infinite ease-in-out;
+    }
+    .typing-dots > span:nth-child(2){ animation-delay:.15s; }
+    .typing-dots > span:nth-child(3){ animation-delay:.30s; }
+    @keyframes typing-bounce{
+      0%, 60%, 100% { transform: translateY(0); opacity:.45; }
+      30%           { transform: translateY(-4px); opacity:1; }
+    }
     .bubble.agent::before{
       content:"";
       position:absolute;
@@ -3322,8 +3374,13 @@
 
     function addBubble(role, text, files){
       const box = document.createElement('div');
-      box.className = 'bubble ' + (role === 'user' ? 'user' : 'agent');
-      box.textContent = text || '';
+      const isAgent = role !== 'user';
+      box.className = 'bubble ' + (isAgent ? 'agent markdown' : 'user');
+      if (isAgent){
+        box.innerHTML = renderMarkdown(text || '');
+      } else {
+        box.textContent = text || '';
+      }
       $('messages').appendChild(box);
       if (files && files.length){
         const meta = document.createElement('div');
@@ -3371,6 +3428,137 @@
       const r = await fetch(path, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body || {}), signal: state.aborter?.signal});
       if (!r.ok) throw new Error(_extractError(await r.text()));
       return await r.json();
+    }
+
+    // ====== Markdown renderer (minimal, streaming-friendly) ======
+    function renderMarkdown(md){
+      let text = String(md || '').replace(/\r\n?/g, '\n');
+
+      // 1. Fenced code blocks -> placeholders (preserve content verbatim)
+      const codeBlocks = [];
+      text = text.replace(/```([a-zA-Z0-9_+\-.]*)\n([\s\S]*?)(?:```|$)/g, (_, lang, code) => {
+        const i = codeBlocks.length;
+        const langClass = lang ? ` class="lang-${esc(lang)}"` : '';
+        codeBlocks.push(`<pre><code${langClass}>${esc(code)}</code></pre>`);
+        return ` CB${i} `;
+      });
+
+      // 2. Inline code -> placeholders
+      const inlineCodes = [];
+      text = text.replace(/`([^`\n]+)`/g, (_, code) => {
+        const i = inlineCodes.length;
+        inlineCodes.push(`<code>${esc(code)}</code>`);
+        return ` IC${i} `;
+      });
+
+      // 3. Escape everything else (placeholders survive intact)
+      text = esc(text);
+
+      // 4. Headers (#, ##, ###...)
+      text = text.replace(/^(#{1,6})\s+(.+)$/gm, (_, h, t) => `<h${h.length}>${t}</h${h.length}>`);
+
+      // 5. Horizontal rules
+      text = text.replace(/^\s*([-*_])\s*\1\s*\1[\s\S]*?$/gm, (line) => {
+        const stripped = line.replace(/\s/g, '');
+        if (/^([-*_])\1{2,}$/.test(stripped)) return '<hr>';
+        return line;
+      });
+
+      // 6. GFM tables: block of lines like `| a | b |` with a separator row `|---|---|`
+      text = text.replace(/(?:^\|.*\|\s*$\n?){2,}/gm, (block) => {
+        const rows = block.trim().split('\n').map(line =>
+          line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim())
+        );
+        if (rows.length < 2) return block;
+        const sep = rows[1];
+        const isSep = sep.every(c => /^:?-{3,}:?$/.test(c));
+        if (!isSep) return block;
+        const header = rows[0];
+        const body = rows.slice(2);
+        const thead = '<thead><tr>' + header.map(c => `<th>${c}</th>`).join('') + '</tr></thead>';
+        const tbody = '<tbody>' + body.map(r =>
+          '<tr>' + header.map((_, idx) => `<td>${r[idx] || ''}</td>`).join('') + '</tr>'
+        ).join('') + '</tbody>';
+        return `<table>${thead}${tbody}</table>`;
+      });
+
+      // 7. Blockquotes (single-line; consecutive blockquote lines collapse)
+      text = text.replace(/(?:^&gt;\s?.*(?:\n|$))+/gm, (block) => {
+        const inner = block.split('\n').filter(Boolean).map(l => l.replace(/^&gt;\s?/, '')).join('<br>');
+        return `<blockquote>${inner}</blockquote>`;
+      });
+
+      // 8. Unordered lists
+      text = text.replace(/(?:^[ \t]*[-*+]\s+.+(?:\n|$))+/gm, (block) => {
+        const items = block.trim().split(/\n/).map(l => l.replace(/^[ \t]*[-*+]\s+/, ''));
+        return '<ul>' + items.map(i => `<li>${i}</li>`).join('') + '</ul>';
+      });
+
+      // 9. Ordered lists
+      text = text.replace(/(?:^[ \t]*\d+\.\s+.+(?:\n|$))+/gm, (block) => {
+        const items = block.trim().split(/\n/).map(l => l.replace(/^[ \t]*\d+\.\s+/, ''));
+        return '<ol>' + items.map(i => `<li>${i}</li>`).join('') + '</ol>';
+      });
+
+      // 10. Bold / italic (bold first to avoid eating into italic markers)
+      text = text.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
+      text = text.replace(/__([^_\n]+)__/g, '<strong>$1</strong>');
+      text = text.replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, '$1<em>$2</em>');
+      text = text.replace(/(^|[^_])_([^_\n]+)_(?!_)/g, '$1<em>$2</em>');
+
+      // 11. Links [text](url)
+      text = text.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, label, url) => {
+        const safeUrl = /^(https?:|mailto:|\/)/i.test(url) ? url : '#';
+        return `<a href="${esc(safeUrl)}" target="_blank" rel="noopener">${label}</a>`;
+      });
+
+      // 12. Paragraphs: split on blank lines, wrap non-block content in <p>
+      const blocks = text.split(/\n{2,}/).map(b => {
+        const trimmed = b.trim();
+        if (!trimmed) return '';
+        if (/^<(h\d|ul|ol|pre|table|blockquote|hr)/.test(trimmed)) return trimmed;
+        if (/^ CB\d+ $/.test(trimmed)) return trimmed;
+        return `<p>${trimmed.replace(/\n/g, '<br>')}</p>`;
+      });
+      text = blocks.filter(Boolean).join('');
+
+      // 13. Restore code placeholders
+      text = text.replace(/ CB(\d+) /g, (_, i) => codeBlocks[Number(i)] || '');
+      text = text.replace(/ IC(\d+) /g, (_, i) => inlineCodes[Number(i)] || '');
+
+      return text;
+    }
+
+    // ====== SSE stream parser ======
+    async function* parseSSEStream(response){
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      function* flush(rawBlock){
+        let evt = 'message', data = '';
+        for (const line of rawBlock.split('\n')){
+          if (line.startsWith('event:')) evt = line.slice(6).trim();
+          else if (line.startsWith('data:')) data += (data ? '\n' : '') + line.slice(5).trim();
+        }
+        if (!data && evt === 'message') return;
+        let parsed = {};
+        try { parsed = data ? JSON.parse(data) : {}; } catch(_) { parsed = {raw: data}; }
+        yield {event: evt, data: parsed};
+      }
+      while (true){
+        const {value, done} = await reader.read();
+        if (done){
+          if (buffer.trim()) yield* flush(buffer);
+          return;
+        }
+        buffer += decoder.decode(value, {stream: true});
+        let idx;
+        while ((idx = buffer.indexOf('\n\n')) !== -1){
+          const block = buffer.slice(0, idx);
+          buffer = buffer.slice(idx + 2);
+          yield* flush(block);
+        }
+      }
     }
 
     async function loadTaskHistory(){
@@ -3537,6 +3725,21 @@
       startLogFlow();
       if (state.taskMode) startTaskPolling();
 
+      // Hoisted so the catch block can clean up the pre-created typing bubble if the
+      // request errors out before any content arrives.
+      let agentBubble = null;
+      let streamedText = '';
+
+      // Eagerly insert an agent bubble with an animated typing indicator so the user
+      // gets immediate feedback instead of staring at an empty messages pane while
+      // the server is still building context / waiting for first token.
+      agentBubble = document.createElement('div');
+      agentBubble.className = 'bubble agent markdown';
+      agentBubble.innerHTML = '<span class="typing-dots"><span></span><span></span><span></span></span>';
+      agentBubble.dataset.typing = '1';
+      $('messages').appendChild(agentBubble);
+      requestAnimationFrame(() => $('messages').scrollTo({top: $('messages').scrollHeight, behavior: 'smooth'}));
+
       try{
         const payload = {
           session_id: state.sessionId || null,
@@ -3546,28 +3749,168 @@
           file_permission: state.filePermission || null,
           task_mode: !!state.taskMode,
         };
-        const out = await apiPost('/api/chat', payload);
-        state.sessionId = out.session_id;
-        localStorage.setItem('auctus.sid', state.sessionId);
-        if (out.task) renderTaskPanel(out.task);
+        const response = await fetch('/api/chat/stream', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(payload),
+          signal: state.aborter?.signal,
+        });
+        if (!response.ok){
+          throw new Error(_extractError(await response.text()));
+        }
 
-        if (out.permission_request){
+        let finalReply = '';
+        let finalFiles = [];
+        let finalTask = null;
+        let permissionRequest = null;
+        let toolIndicator = null;
+
+        const ensureBubble = () => {
+          if (!agentBubble){
+            agentBubble = document.createElement('div');
+            agentBubble.className = 'bubble agent markdown';
+            agentBubble.innerHTML = '';
+            $('messages').appendChild(agentBubble);
+          }
+          return agentBubble;
+        };
+        const clearTypingIndicator = () => {
+          if (agentBubble && agentBubble.dataset.typing){
+            agentBubble.innerHTML = '';
+            delete agentBubble.dataset.typing;
+          }
+        };
+        const scrollToBottom = () => {
+          requestAnimationFrame(() => $('messages').scrollTo({top: $('messages').scrollHeight, behavior: 'smooth'}));
+        };
+        // Batch markdown re-renders via rAF — coalesces fast token deltas into one paint.
+        let mdRenderScheduled = false;
+        const scheduleMarkdownRender = (bubble) => {
+          if (mdRenderScheduled) return;
+          mdRenderScheduled = true;
+          requestAnimationFrame(() => {
+            mdRenderScheduled = false;
+            bubble.innerHTML = renderMarkdown(streamedText);
+            // Re-attach the tool indicator if it existed (innerHTML wiped it).
+            if (toolIndicator && !bubble.contains(toolIndicator)){
+              bubble.appendChild(toolIndicator);
+            }
+            $('messages').scrollTo({top: $('messages').scrollHeight, behavior: 'smooth'});
+          });
+        };
+
+        for await (const {event, data} of parseSSEStream(response)){
+          if (event === 'meta'){
+            if (data.session_id){
+              state.sessionId = data.session_id;
+              localStorage.setItem('auctus.sid', state.sessionId);
+            }
+            if (data.task) renderTaskPanel(data.task);
+          } else if (event === 'text'){
+            const bubble = ensureBubble();
+            const delta = data.delta || '';
+            if (delta){
+              clearTypingIndicator();
+              streamedText += delta;
+              scheduleMarkdownRender(bubble);
+            }
+          } else if (event === 'tool_start'){
+            const bubble = ensureBubble();
+            clearTypingIndicator();
+            if (!toolIndicator){
+              toolIndicator = document.createElement('div');
+              toolIndicator.className = 'meta';
+              bubble.appendChild(toolIndicator);
+            }
+            toolIndicator.textContent = '· ' + (data.activity || ('正在执行：' + (data.name || '')));
+            scrollToBottom();
+          } else if (event === 'tool_end'){
+            if (toolIndicator){
+              toolIndicator.textContent = '· ' + (data.ok ? '已完成' : '出错，换方法') + '：' + (data.name || '');
+            }
+          } else if (event === 'replace'){
+            // Server is about to re-emit the final reply from scratch (e.g. the
+            // comparison-table augmentation). Wipe what we've shown so far and
+            // re-show the typing indicator so the user knows new content is coming.
+            streamedText = '';
+            if (agentBubble){
+              agentBubble.innerHTML = '<span class="typing-dots"><span></span><span></span><span></span></span>';
+              agentBubble.dataset.typing = '1';
+            }
+            // Tool indicator stays valid for this iteration; re-attach if it exists.
+            if (toolIndicator && agentBubble){
+              agentBubble.appendChild(toolIndicator);
+            }
+          } else if (event === 'permission_request'){
+            permissionRequest = data;
+          } else if (event === 'end'){
+            finalReply = (data.reply != null ? data.reply : finalReply);
+            finalFiles = data.files || [];
+            finalTask = data.task || null;
+          } else if (event === 'error'){
+            throw new Error(data.message || 'unknown error');
+          }
+        }
+
+        if (permissionRequest){
+          if (agentBubble) agentBubble.remove();
           state.pendingMessage = msg;
-          openPermissionModal(out.permission_request);
+          openPermissionModal(permissionRequest);
           return;
         }
 
-        // 已收到有效回复，清理选择态（避免残留）
+        if (finalTask) renderTaskPanel(finalTask);
         if (state.awaitingChoice) clearAwaitingChoice();
         if (state.awaitingConfirm) clearAwaitingConfirm();
-        // 任务已完成（拿到最终回复），清理一次性权限，避免下次“误继承”
         state.terminalPermission = '';
         state.calendarPermission = '';
         state.filePermission = '';
 
-        addBubble('agent', out.reply || '（无输出）', out.files || []);
-        if ((out.reply || '').trim()) chime();
+        if (toolIndicator) toolIndicator.remove();
+
+        if (!agentBubble){
+          addBubble('agent', finalReply || '（无输出）', finalFiles);
+        } else {
+          // Final render: use the canonical reply from end event (already stripped of markers).
+          // Fall back to a placeholder if both server reply and streamed buffer are empty
+          // (avoids leaving an empty bubble or stranded typing dots).
+          const rawFinal = (finalReply != null && finalReply !== '') ? finalReply : streamedText;
+          const finalText = rawFinal || '（无输出）';
+          // Keep streamedText consistent so any late rAF render won't overwrite this with stale content.
+          streamedText = finalText;
+          delete agentBubble.dataset.typing;
+          agentBubble.innerHTML = renderMarkdown(finalText);
+          if (finalFiles && finalFiles.length){
+            const meta = document.createElement('div');
+            meta.className = 'meta';
+            meta.innerHTML = `<span>${esc(tr('outputFiles'))}</span>` + finalFiles.map(u => `<a class="file" href="${esc(u)}" target="_blank" rel="noopener">${esc(u.split('/').pop())}</a>`).join(' · ');
+            $('messages').appendChild(meta);
+          }
+          if (maybeEnterAwaitingChoiceFromAgent(finalText)){
+            renderQuickActionsForAwaitingChoice();
+          } else if (maybeEnterAwaitingConfirmFromAgent(finalText)){
+            renderQuickActionsForAwaitingConfirm();
+          }
+          trimMessagesIfCapsule();
+        }
+
+        if ((finalReply || streamedText || '').trim()) chime();
       }catch(e){
+        // Remove the pre-created typing bubble if no content arrived — otherwise we'd
+        // end up with a stranded animated dots bubble followed by the error bubble.
+        if (agentBubble && agentBubble.dataset.typing && !streamedText){
+          agentBubble.remove();
+          agentBubble = null;
+        } else if (agentBubble && streamedText && e?.name !== 'AbortError'){
+          // Partial reply was streamed and the connection failed mid-stream. Mid-stream
+          // resume isn't possible (agent is past tool calls / state changes), but we can
+          // at least tell the user the bubble is incomplete instead of silently losing.
+          const marker = document.createElement('div');
+          marker.className = 'meta';
+          marker.style.opacity = '0.6';
+          marker.textContent = '· 连接中断，回复可能不完整';
+          agentBubble.appendChild(marker);
+        }
         if (e?.name === 'AbortError'){
           if (state.stopRequested){
             addBubble('agent', '已停止当前请求（你已接管）。');

@@ -9,10 +9,16 @@ from __future__ import annotations
 import html
 import json
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Iterator, Optional
 from urllib.parse import urlparse
+
+# 后台线程池：并行化每轮的 embed-based context 构建（memory recall + RAG search）。
+# 模块级 long-lived executor 避免每轮重复创建线程。
+_CONTEXT_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ctx-builder")
 
 from .config import settings
 from . import accounting, evidence, evolution, intent, llm, memory, playbooks, preferences, routing, session_control, skills_manager, task_mode, tools
@@ -41,7 +47,7 @@ def _build_messages(
     """组装一次完整调用所需的 messages：system + 摘要 + 历史 + 当前。"""
     intent_decision = intent_decision or intent.classify(user_text, extra_system_context=extra_system_context)
     history = memory.load_history(session_id, limit=40)
-    history = memory.summarize_and_truncate(
+    history = memory.prepare_history_for_turn(
         session_id,
         history,
         keep_recent=12,
@@ -52,38 +58,60 @@ def _build_messages(
         require_reasoning_content=_requires_reasoning_content_echo(model),
     )
 
+    # 先把可能触发 embed 网络调用的两个上下文 builder 丢到线程池里跑，
+    # 后面同步组装其他 system 消息时它们已经在并行 in-flight。
+    memory_ctx_future = _CONTEXT_EXECUTOR.submit(_memory_context, user_text)
+    rag_ctx_future = (
+        _CONTEXT_EXECUTOR.submit(_rag_context, user_text)
+        if intent_decision.get("use_rag") else None
+    )
+
+    # === 稳定前缀（命中 DeepSeek/Anthropic 自动 prompt cache）===
+    # 这些 system 消息每轮都一样（或多轮才变一次），放在最前面让缓存吃到。
     msgs: list[dict] = [{"role": "system", "content": _system_prompt()}]
-    msgs.append({"role": "system", "content": _datetime_context()})
-    msgs.append({"role": "system", "content": _workspace_context()})
-    msgs.append({"role": "system", "content": _language_context()})
-    msgs.append({"role": "system", "content": _turn_language_context(user_text)})
     msgs.append({"role": "system", "content": _persona_context()})
+    msgs.append({"role": "system", "content": _language_context()})
+    skills_context = skills_manager.context_for_all_enabled()
+    if skills_context:
+        msgs.append({"role": "system", "content": skills_context})
+    msgs.append({"role": "system", "content": _workspace_context()})
     preference_context = preferences.context(max_chars=800)
     if preference_context:
         msgs.append({"role": "system", "content": preference_context})
+    pinned = _pinned_context()
+    if pinned:
+        msgs.append({"role": "system", "content": pinned})
+
+    # === 动态后缀（每轮可能变化）===
+    msgs.append({"role": "system", "content": _datetime_context()})
+    msgs.append({"role": "system", "content": _turn_language_context(user_text)})
     msgs.append({"role": "system", "content": intent.prompt_context(intent_decision)})
-    memory_context = _memory_context(user_text)
+    try:
+        memory_context = memory_ctx_future.result()
+    except Exception as exc:
+        print(f"[agent] memory context build failed: {exc}")
+        memory_context = ""
     if memory_context:
         msgs.append({"role": "system", "content": memory_context})
-    # 历史会话摘要由 memory.summarize_and_truncate 负责插入（按 msg_id 分段累计，且避免重复压缩）
     evolution_context = evolution.build_runtime_context(user_text)
     if evolution_context:
         msgs.append({"role": "system", "content": evolution_context})
     playbook_context = playbooks.context_for(user_text)
     if playbook_context:
         msgs.append({"role": "system", "content": playbook_context})
-    skills_context = skills_manager.context_for_all_enabled()
-    if skills_context:
-        msgs.append({"role": "system", "content": skills_context})
     if intent_decision.get("should_suggest_automation") and accounting.get_setup_state().get("proactive_suggestions", "1") == "1":
         msgs.append({"role": "system", "content": "当前用户消息含有重复性/定期任务特征。如果回答完任务后语境自然合适，可用一句话问用户是否要设置定时任务自动执行，但不要强行插入，判断是否真的适合再问。"})
     record_write_context = _persistent_record_write_context(user_text)
     if record_write_context:
         msgs.append({"role": "system", "content": record_write_context})
-    pinned = _pinned_context()
-    if pinned:
-        msgs.append({"role": "system", "content": pinned})
-    rag = _rag_context(user_text) if intent_decision.get("use_rag") else ""
+    if rag_ctx_future is not None:
+        try:
+            rag = rag_ctx_future.result()
+        except Exception as exc:
+            print(f"[agent] rag context build failed: {exc}")
+            rag = ""
+    else:
+        rag = ""
     if rag:
         msgs.append({"role": "system", "content": rag})
     recent = _recent_sessions_context(session_id) if intent_decision.get("use_recent_sessions") else ""
@@ -262,7 +290,7 @@ def _chat_with_tools(
                 "content": json.dumps(result, ensure_ascii=False),
             }
             msgs.append(tool_msg)
-            memory.append_message(session_id, tool_msg)
+            memory.append_message(session_id, _compress_tool_msg_for_memory(tool_msg))
             if isinstance(result, dict) and result.get("error"):
                 task_mode.add_activity(session_id, "这个来源响应不完整，正在换方法", "tool_error")
                 pending_error_notes.append(
@@ -303,6 +331,275 @@ def _chat_with_tools(
     return {"reply": fallback, "files": files_produced}
 
 
+def _stream_collect(stream: Iterator[dict]) -> Iterator[dict]:
+    """累积 chat_completion_stream，逐 token yield text 事件，最后用 return 把
+    完整的 ai_msg + usage + model 一起还回去（通过 yield from 的返回值机制）。"""
+    full_content = ""
+    tool_calls_by_index: dict[int, dict] = {}
+    usage: dict = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    used_model = settings.model
+
+    for chunk in stream:
+        if chunk.get("usage"):
+            u = chunk["usage"]
+            usage = {
+                "prompt_tokens": u.get("prompt_tokens", 0),
+                "completion_tokens": u.get("completion_tokens", 0),
+                "total_tokens": u.get("total_tokens", 0),
+            }
+        if chunk.get("model"):
+            used_model = chunk["model"]
+        choices = chunk.get("choices") or []
+        if not choices:
+            continue
+        delta = choices[0].get("delta") or {}
+        content_delta = delta.get("content")
+        if content_delta:
+            full_content += content_delta
+            yield {"type": "text", "delta": content_delta}
+        for tc in (delta.get("tool_calls") or []):
+            idx = tc.get("index", 0)
+            entry = tool_calls_by_index.setdefault(idx, {
+                "id": "",
+                "type": "function",
+                "function": {"name": "", "arguments": ""},
+            })
+            if tc.get("id"):
+                entry["id"] = tc["id"]
+            if tc.get("type"):
+                entry["type"] = tc["type"]
+            fn = tc.get("function") or {}
+            if fn.get("name") and not entry["function"]["name"]:
+                entry["function"]["name"] = fn["name"]
+            if fn.get("arguments"):
+                entry["function"]["arguments"] += fn["arguments"]
+
+    ai_msg: dict = {"role": "assistant"}
+    if full_content:
+        ai_msg["content"] = full_content
+    else:
+        ai_msg["content"] = None
+    if tool_calls_by_index:
+        ai_msg["tool_calls"] = [tool_calls_by_index[i] for i in sorted(tool_calls_by_index.keys())]
+    return {"ai_msg": ai_msg, "usage": usage, "model": used_model}
+
+
+def chat_stream(
+    session_id: str,
+    user_text: str,
+    extra_system_context: Optional[str] = None,
+    allow_tools: bool = True,
+) -> Iterator[dict]:
+    """流式版本的 chat()。
+
+    产出事件序列：
+      {"type": "text", "delta": "..."}        — 用户可见文本增量
+      {"type": "tool_start", "name": "...", "activity": "..."}
+      {"type": "tool_end", "name": "...", "ok": bool}
+      {"type": "stopped", "reply": "...", "files": [...]}
+      {"type": "done", "reply": "...", "files": [...]}
+    """
+    files_produced: list[str] = []
+    base_output_dir = settings.output_dir
+    task_output_dir = base_output_dir / _safe_task_id(session_id)
+    task_output_dir.mkdir(parents=True, exist_ok=True)
+    settings.output_dir = task_output_dir
+    explicit_paths = _extract_existing_paths(user_text)
+    intent_decision = intent.classify(user_text, extra_system_context=extra_system_context, explicit_paths=explicit_paths)
+
+    try:
+        with tools.chat_authorized_paths(explicit_paths):
+            with accounting.usage_context(
+                user_id=accounting.LOCAL_USER_ID,
+                session_id=session_id,
+                route=accounting.current_route(),
+            ):
+                effective_model = routing.resolve_model(intent_decision.get("model_tier") or routing.classify(user_text))
+                msgs = _build_messages(
+                    session_id,
+                    user_text,
+                    extra_system_context=extra_system_context,
+                    intent_decision=intent_decision,
+                    model=effective_model,
+                )
+                if explicit_paths:
+                    msgs.insert(-1, {
+                        "role": "system",
+                        "content": (
+                            "[本轮用户显式授权路径]\n"
+                            + "\n".join(f"- {p}" for p in explicit_paths)
+                            + "\n这些路径来自用户当前消息。可以用 read_file 读取这些文件，"
+                            "如果是文件夹，可以读取其目录列表及子文件。"
+                        ),
+                    })
+                memory.append_message(session_id, {"role": "user", "content": user_text})
+                _auto_remember_user_facts(user_text)
+                effective_allow_tools = allow_tools and bool(intent_decision.get("use_tools", True))
+
+                if not effective_allow_tools:
+                    stream = llm.chat_completion_stream(messages=msgs, model=effective_model)
+                    result = yield from _stream_collect(stream)
+                    ai_msg = result["ai_msg"]
+                    raw_content = ai_msg.get("content") or ""
+                    clean_msg = dict(ai_msg)
+                    clean_msg["content"] = task_mode.strip_update_markers(raw_content)
+                    memory.append_message(session_id, clean_msg)
+                    yield {"type": "done", "reply": raw_content, "files": files_produced}
+                    return
+
+                tool_schemas = tools.tool_schemas_for(
+                    user_text,
+                    extra_system_context=extra_system_context,
+                    intent_decision=intent_decision,
+                )
+                yield from _chat_stream_with_tools(
+                    session_id,
+                    user_text,
+                    msgs,
+                    files_produced,
+                    tool_schemas,
+                    model=effective_model,
+                    require_file_write=bool(_persistent_record_write_context(user_text)),
+                )
+    finally:
+        settings.output_dir = base_output_dir
+
+
+def _chat_stream_with_tools(
+    session_id: str,
+    user_text: str,
+    msgs: list[dict],
+    files_produced: list[str],
+    tool_schemas: list[dict],
+    model: str = "",
+    require_file_write: bool = False,
+) -> Iterator[dict]:
+    """流式工具循环。逻辑与 _chat_with_tools 等价，把 LLM 调用换成流式版本。"""
+    last_tool_results: list[dict] = []
+    max_iterations = min(settings.max_tool_iterations, 4) if _looks_like_shopping_or_quote_task(user_text) else settings.max_tool_iterations
+    for iteration in range(max_iterations):
+        if session_control.is_stopped(session_id):
+            stop_msg = "已停止当前任务。"
+            memory.append_message(session_id, {"role": "assistant", "content": stop_msg})
+            yield {"type": "stopped", "reply": stop_msg, "files": files_produced}
+            return
+
+        stream = llm.chat_completion_stream(messages=msgs, tools=tool_schemas, model=model)
+        result = yield from _stream_collect(stream)
+        ai_msg = result["ai_msg"]
+        token_usage = result["usage"]
+        model = result["model"] or model or settings.model
+
+        dsml_tool_calls = _extract_dsml_tool_calls(ai_msg.get("content") or "", iteration=iteration)
+        if dsml_tool_calls and not ai_msg.get("tool_calls"):
+            clean_content = _strip_dsml_tool_blocks(ai_msg.get("content") or "")
+            ai_msg = dict(ai_msg)
+            ai_msg["content"] = clean_content
+            ai_msg["tool_calls"] = dsml_tool_calls
+        msgs.append(ai_msg)
+
+        tool_calls = ai_msg.get("tool_calls") or []
+        if not tool_calls:
+            if require_file_write and not _has_successful_write_file(last_tool_results):
+                msgs.append({
+                    "role": "system",
+                    "content": (
+                        "[必须完成文件写入]\n"
+                        "本轮是长期记录更新任务，但你还没有成功调用 write_file。"
+                        "不能回复“已记录/已保存/完成”。下一步必须先 read_file 目标文件，"
+                        "把用户的新记录追加到文件内的数据结构，再调用 write_file 覆盖同一个文件。"
+                        "如果无法写入，最终必须明确说没有记录成功。"
+                    ),
+                })
+                continue
+            raw_content = ai_msg.get("content") or ""
+            if _needs_comparison_table(user_text, raw_content, last_tool_results):
+                # 让 UI 清空已经流过的 raw_content，从空白开始流出表格增强版。
+                yield {"type": "replace"}
+                raw_content = yield from _add_comparison_table_stream(user_text, raw_content, last_tool_results)
+            clean_msg = dict(ai_msg)
+            clean_msg["content"] = task_mode.strip_update_markers(raw_content)
+            memory.append_message(session_id, clean_msg)
+            yield {"type": "done", "reply": raw_content, "files": files_produced}
+            return
+
+        memory.append_message(session_id, ai_msg)
+
+        pending_error_notes: list[str] = []
+        for tc in tool_calls:
+            name = tc["function"]["name"]
+            args = tc["function"].get("arguments", "{}")
+            activity_text = _tool_activity_text(name, args)
+            task_mode.add_activity(session_id, activity_text, "tool")
+            yield {"type": "tool_start", "name": name, "activity": activity_text}
+            result_obj = tools.run_tool(
+                name, args,
+                task_id=session_id,
+                user_input=user_text,
+                model=model,
+                token_usage=token_usage,
+            )
+            ok = not (isinstance(result_obj, dict) and result_obj.get("error"))
+            yield {"type": "tool_end", "name": name, "ok": ok}
+            saved_evidence = evidence.record_tool_result(session_id, name, result_obj)
+            if saved_evidence:
+                task_mode.add_activity(session_id, f"已保存 {len(saved_evidence)} 条来源证据", "artifact")
+
+            if isinstance(result_obj, dict) and "path" in result_obj:
+                files_produced.append(result_obj["path"])
+                _remember_artifact_path(user_text, name, result_obj)
+            last_tool_results.append({
+                "name": name,
+                "result": result_obj,
+            })
+
+            tool_msg = {
+                "role": "tool",
+                "tool_call_id": tc["id"],
+                "name": name,
+                "content": json.dumps(result_obj, ensure_ascii=False),
+            }
+            msgs.append(tool_msg)
+            memory.append_message(session_id, _compress_tool_msg_for_memory(tool_msg))
+            if isinstance(result_obj, dict) and result_obj.get("error"):
+                task_mode.add_activity(session_id, "这个来源响应不完整，正在换方法", "tool_error")
+                pending_error_notes.append(
+                    f"工具 {name} 没有完成任务，错误是：{result_obj.get('error')}"
+                )
+            elif name in {"search_web", "fetch_webpage", "browser_open", "browser_read"}:
+                task_mode.add_activity(session_id, "已检查一个来源，继续整理结果", "tool_done")
+
+        if pending_error_notes:
+            msgs.append({
+                "role": "system",
+                "content": (
+                    "[工具执行失败]\n"
+                    + "\n".join(pending_error_notes)
+                    + "\n最终回复必须明确说明未执行成功，不要声称已经完成。"
+                ),
+            })
+        strategy_hint = _tool_strategy_hint(user_text, last_tool_results)
+        if strategy_hint:
+            msgs.append({"role": "system", "content": strategy_hint})
+        evidence_context = evidence.prompt_context(session_id)
+        if evidence_context:
+            msgs.append({"role": "system", "content": evidence_context})
+        if _looks_like_shopping_or_quote_task(user_text) and iteration >= 2:
+            task_mode.add_activity(session_id, "搜索预算接近上限，正在整理已有结果", "organizing")
+            msgs.append({
+                "role": "system",
+                "content": (
+                    "[研究预算即将用完]\n"
+                    "购买/报价任务最多再做一轮工具调用。下一次回复必须停止继续搜索并整理结果："
+                    "输出标准 Markdown 对比表；如果价格/库存不完整，也要用“待核验”列出候选配置、来源、优点、风险、下一步核验项。"
+                ),
+            })
+
+    fallback = yield from _tool_loop_fallback_stream(user_text, last_tool_results)
+    memory.append_message(session_id, {"role": "assistant", "content": fallback})
+    yield {"type": "done", "reply": fallback, "files": files_produced}
+
+
 def _tool_loop_fallback(user_text: str, tool_results: list[dict]) -> str:
     if not tool_results:
         return "我没能完成这个任务：工具调用没有收敛。请把任务拆小一点，或给我更具体的网页/文件路径。"
@@ -328,6 +625,93 @@ def _tool_loop_fallback(user_text: str, tool_results: list[dict]) -> str:
         return resp["choices"][0]["message"].get("content") or "工具调用未收敛，但已获得部分结果；请换一个更具体的问题再试。"
     except Exception:
         return "工具调用未收敛，但已获得部分结果；请换一个更具体的问题再试。"
+
+
+def _stream_simple_chat(messages: list[dict], temperature: float = 0.2) -> Iterator[dict]:
+    """单次流式 LLM 调用助手。沿途 yield text 事件，用 return 把最终 ai_msg 还回去。"""
+    stream = llm.chat_completion_stream(messages=messages, temperature=temperature)
+    result = yield from _stream_collect(stream)
+    return result["ai_msg"]
+
+
+def _tool_loop_fallback_stream(user_text: str, tool_results: list[dict]) -> Iterator[dict]:
+    """流式版本的 _tool_loop_fallback。yield text 事件，return 最终 reply 字符串。"""
+    if not tool_results:
+        msg = "我没能完成这个任务：工具调用没有收敛。请把任务拆小一点，或给我更具体的网页/文件路径。"
+        yield {"type": "text", "delta": msg}
+        return msg
+    compact = json.dumps(_compact_tool_results(tool_results[-8:]), ensure_ascii=False)
+    try:
+        ai_msg = yield from _stream_simple_chat(
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "你是结果整理器。工具循环已到上限，不能再调用工具。"
+                        "请只根据已有工具结果给用户一个有用回复；如果信息不完整，明确说明缺口。"
+                        "但不要把工具失败本身当最终答案，也不要只建议用户自行打开网页。"
+                        "必须给出：1) 已知信息，2) 信息缺口，3) 还能怎么换策略，4) 基于常识/已有结果的可行动建议，5) 下一步需要用户确认的最少问题。"
+                        "如果这是购买、报价、保险、旅行或比较任务，必须输出标准 Markdown 表格，列出候选、价格/报价、来源、优点、风险、下一步核验项；"
+                        "没有完整数据时也要用“待核验”填充，不要只写段落。"
+                    ),
+                },
+                {"role": "user", "content": f"用户问题：{user_text}\n\n已有工具结果：\n{compact}"},
+            ],
+            temperature=0.2,
+        )
+        content = ai_msg.get("content") or "工具调用未收敛，但已获得部分结果；请换一个更具体的问题再试。"
+        return content
+    except Exception:
+        msg = "工具调用未收敛，但已获得部分结果；请换一个更具体的问题再试。"
+        yield {"type": "text", "delta": msg}
+        return msg
+
+
+def _add_comparison_table_stream(
+    user_text: str, reply: str, tool_results: list[dict]
+) -> Iterator[dict]:
+    """流式版本的 _add_comparison_table。
+
+    调用前外层会先 emit 一个 `replace` 事件清空 UI 已有内容；本函数从空白开始
+    流出补全后的回复。如果 LLM 输出没有合法 markdown 表格，再 emit 一次 replace
+    + 静态 fallback 表格作为兜底。返回最终 reply 字符串（供 memory 持久化）。
+    """
+    compact = json.dumps(_compact_tool_results(tool_results[-8:]), ensure_ascii=False)
+    try:
+        ai_msg = yield from _stream_simple_chat(
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "你是任务结果整理器，不能调用工具。保留原回复中的有效信息，但必须补充一个标准 Markdown 对比表。"
+                        "表格列必须包含：候选、价格/报价、关键配置/条款、来源、优点、风险、下一步核验项。"
+                        "如果没有完整数据，用“待核验”填写，不要空表，不要只写段落。"
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"用户问题：{user_text}\n\n"
+                        f"原回复：\n{reply}\n\n"
+                        f"已有工具结果：\n{compact}"
+                    ),
+                },
+            ],
+            temperature=0.2,
+        )
+        content = ai_msg.get("content") or ""
+        if _contains_markdown_table(content):
+            return content
+        # LLM 没产出合规表格 —— 用静态 fallback 替换刚刚流过的内容。
+        yield {"type": "replace"}
+        fallback = _fallback_comparison_table(reply)
+        yield {"type": "text", "delta": fallback}
+        return fallback
+    except Exception:
+        yield {"type": "replace"}
+        fallback = _fallback_comparison_table(reply)
+        yield {"type": "text", "delta": fallback}
+        return fallback
 
 
 def _tool_activity_text(name: str, args_json: str) -> str:
@@ -489,6 +873,33 @@ def _looks_like_shopping_or_quote_task(user_text: str) -> bool:
         "买", "购买", "划算", "性价比", "报价", "保险", "笔记本", "电脑", "游戏本",
     )
     return any(signal in lowered for signal in signals)
+
+
+_TOOL_RESULT_MEMORY_MAX_CHARS = 2000
+
+
+def _compress_tool_msg_for_memory(tool_msg: dict) -> dict:
+    """把 tool message 持久化进 history 之前压缩 content。
+
+    工具结果（fetch_webpage / search_web 等）原始大小常有 10KB+，每轮 load_history
+    都会被重发给模型，token 浪费很大。本函数返回一个浅拷贝，把 content 字符串
+    截断成 head+tail 形式（保留 JSON 外壳便于人/模型解读），中间标记跳过字数。
+    当前 turn 的 msgs 缓冲区仍保有原始完整 content，不受影响。
+    """
+    content = tool_msg.get("content")
+    if not isinstance(content, str) or len(content) <= _TOOL_RESULT_MEMORY_MAX_CHARS:
+        return tool_msg
+    head_chars = _TOOL_RESULT_MEMORY_MAX_CHARS * 2 // 3
+    tail_chars = _TOOL_RESULT_MEMORY_MAX_CHARS // 3
+    skipped = len(content) - head_chars - tail_chars
+    truncated = (
+        content[:head_chars]
+        + f"\n\n[... {skipped} characters truncated from tool result for history compaction ...]\n\n"
+        + content[-tail_chars:]
+    )
+    compressed = dict(tool_msg)
+    compressed["content"] = truncated
+    return compressed
 
 
 def _compact_tool_results(tool_results: list[dict]) -> list[dict]:
@@ -894,11 +1305,19 @@ def _auto_remember_user_facts(user_text: str) -> None:
         if 20 <= weight <= 300:
             facts.append(("user_weight_kg", f"用户体重是 {weight:g} kg", ["personal", "user_info", "weight", "体重", "bmi"], "preference", 5))
 
-    for key, value, tags, fact_type, importance in facts:
-        try:
-            memory.upsert_memory(key, value, tags=tags, type=fact_type, source="chat", importance=importance)
-        except Exception:
-            pass
+    if not facts:
+        return
+
+    # 新提取的事实只用于未来回合（本轮 memory_context 已读取过旧记忆），
+    # 因此把含 embed 调用的 upsert 放到后台线程，避免阻塞主流式响应。
+    def _persist_facts() -> None:
+        for key, value, tags, fact_type, importance in facts:
+            try:
+                memory.upsert_memory(key, value, tags=tags, type=fact_type, source="chat", importance=importance)
+            except Exception:
+                pass
+
+    threading.Thread(target=_persist_facts, daemon=True, name="auto-remember-facts").start()
 
 
 def _remember_artifact_path(user_text: str, tool_name: str, result: dict) -> None:
