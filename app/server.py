@@ -2209,6 +2209,7 @@ class CalendarAccessIn(BaseModel):
 class ApiKeyIn(BaseModel):
     provider: str
     api_key: str
+    model: Optional[str] = None
 
 
 class ApiKeyValidationIn(BaseModel):
@@ -3429,8 +3430,16 @@ def set_route(body: RouteIn) -> dict:
 
 @app.post("/api/api-keys")
 def save_api_key(body: ApiKeyIn) -> dict:
+    provider = body.provider.strip().lower()
+    model = (body.model or "").strip()
+    if model:
+        expected_provider = accounting.provider_for_model(model)
+        if expected_provider and expected_provider != provider:
+            raise HTTPException(400, f"selected model uses {expected_provider}, not {provider}")
     try:
-        item = accounting.set_api_key(body.provider, body.api_key)
+        item = accounting.set_api_key(provider, body.api_key)
+        if model:
+            settings.model = model
         accounting.set_route("byo")
         accounting.set_setup_state(
             {

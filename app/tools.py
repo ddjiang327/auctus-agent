@@ -305,7 +305,9 @@ def permission_scope_override(scope: Optional[str]):
 
 
 def _authorized_path(path: str) -> Optional[Path]:
-    target = (Path(path) if Path(path).is_absolute() else (settings.workspace_dir / path)).resolve()
+    raw = (path or "").strip()
+    expanded = Path(raw).expanduser()
+    target = (expanded if expanded.is_absolute() else (settings.workspace_dir / expanded)).resolve()
     if _permission_scope() == "full_computer":
         return target
     workspace = settings.workspace_dir.resolve()
@@ -423,26 +425,44 @@ def _extract_text(target: Path, suffix: str) -> str:
 
 # ---- 报告生成 ----
 
-def make_markdown_report(title: str, sections: list[dict]) -> dict:
+def _artifact_output_path(title: str, suffix: str, target_dir: str = "") -> tuple[Optional[Path], str]:
+    fname = f"{int(time.time())}_{_safe(title)}{suffix}"
+    raw_dir = (target_dir or "").strip()
+    if not raw_dir:
+        settings.output_dir.mkdir(parents=True, exist_ok=True)
+        return settings.output_dir / fname, fname
+    expanded = Path(raw_dir).expanduser()
+    target_path = (expanded / fname) if expanded.is_absolute() else (settings.workspace_dir / expanded / fname)
+    authorized = _authorized_path(str(target_path))
+    if authorized is None:
+        return None, fname
+    authorized.parent.mkdir(parents=True, exist_ok=True)
+    return authorized, fname
+
+
+def make_markdown_report(title: str, sections: list[dict], target_dir: str = "") -> dict:
     """生成 Markdown 报告文件。
 
     sections: [{"heading": str, "content": str}]
+    target_dir: optional folder path for the generated file.
     """
     lines = [f"# {title}\n"]
     for s in sections:
         lines.append(f"## {s['heading']}\n")
         lines.append(s.get("content", "") + "\n")
     content = "\n".join(lines)
-    fname = f"{int(time.time())}_{_safe(title)}.md"
-    out_path = settings.output_dir / fname
+    out_path, fname = _artifact_output_path(title, ".md", target_dir)
+    if out_path is None:
+        return {"error": "access denied: target_dir is outside authorized workspace or chat-authorized paths"}
     out_path.write_text(content, encoding="utf-8")
     return {"path": str(out_path), "filename": fname}
 
 
-def make_spreadsheet(title: str, sheets: list[dict]) -> dict:
+def make_spreadsheet(title: str, sheets: list[dict], target_dir: str = "") -> dict:
     """生成 xlsx 文件并返回路径。
 
     sheets: [{ "name": "...", "headers": [...], "rows": [[...], ...] }]
+    target_dir: optional folder path for the generated file.
     """
     wb = Workbook()
     wb.remove(wb.active)
@@ -453,8 +473,9 @@ def make_spreadsheet(title: str, sheets: list[dict]) -> dict:
             ws.append(headers)
         for row in sh.get("rows", []):
             ws.append(row)
-    fname = f"{int(time.time())}_{_safe(title)}.xlsx"
-    out_path = settings.output_dir / fname
+    out_path, fname = _artifact_output_path(title, ".xlsx", target_dir)
+    if out_path is None:
+        return {"error": "access denied: target_dir is outside authorized workspace or chat-authorized paths"}
     wb.save(out_path)
     return {"path": str(out_path), "filename": fname}
 
@@ -479,15 +500,17 @@ td,th{border:1px solid #ddd;padding:8px;text-align:left}
 """
 
 
-def make_webpage(title: str, sections: list[dict]) -> dict:
+def make_webpage(title: str, sections: list[dict], target_dir: str = "") -> dict:
     """生成一个简洁的 HTML 报告页。
 
     sections: [{ "heading": "...", "html": "..." }]
+    target_dir: optional folder path for the generated file.
     """
     tpl = Template(WEBPAGE_TEMPLATE)
     html = tpl.render(title=title, sections=sections, now=time.strftime("%Y-%m-%d %H:%M"))
-    fname = f"{int(time.time())}_{_safe(title)}.html"
-    out_path = settings.output_dir / fname
+    out_path, fname = _artifact_output_path(title, ".html", target_dir)
+    if out_path is None:
+        return {"error": "access denied: target_dir is outside authorized workspace or chat-authorized paths"}
     out_path.write_text(html, encoding="utf-8")
     return {"path": str(out_path), "filename": fname}
 
@@ -520,11 +543,12 @@ root.render(<App />);
 """
 
 
-def make_react_prototype(title: str, jsx_code: str, data: Any = None) -> dict:
+def make_react_prototype(title: str, jsx_code: str, data: Any = None, target_dir: str = "") -> dict:
     """生成 React + Tailwind 单页原型（CDN 版，可直接浏览器打开）。
 
     jsx_code: 完整 JSX 代码，必须包含 function App() {...} 组件。
     data: 可选，任意 JSON 可序列化对象，会内嵌为 window.__APP_DATA__，JSX 直接读取即可。
+    target_dir: optional folder path for the generated file.
     """
     app_data_json = json.dumps(data, ensure_ascii=False) if data is not None else ""
     tpl = Template(REACT_PROTOTYPE_TEMPLATE)
@@ -534,8 +558,9 @@ def make_react_prototype(title: str, jsx_code: str, data: Any = None) -> dict:
         app_data_json=app_data_json,
         now=time.strftime("%Y-%m-%d %H:%M"),
     )
-    fname = f"{int(time.time())}_{_safe(title)}_prototype.html"
-    out_path = settings.output_dir / fname
+    out_path, fname = _artifact_output_path(title, "_prototype.html", target_dir)
+    if out_path is None:
+        return {"error": "access denied: target_dir is outside authorized workspace or chat-authorized paths"}
     out_path.write_text(html, encoding="utf-8")
     return {"path": str(out_path), "filename": fname}
 
@@ -2115,6 +2140,7 @@ TOOL_SCHEMAS: list[dict] = [
                             "required": ["heading", "content"],
                         },
                     },
+                    "target_dir": {"type": "string", "description": "可选。用户指定的保存文件夹路径，例如 ~/Desktop/Project Files。未提供时才使用默认 outputs。"},
                 },
                 "required": ["title", "sections"],
             },
@@ -2141,6 +2167,7 @@ TOOL_SCHEMAS: list[dict] = [
                             "required": ["name", "headers", "rows"],
                         },
                     },
+                    "target_dir": {"type": "string", "description": "可选。用户指定的保存文件夹路径，例如 ~/Desktop/Project Files。未提供时才使用默认 outputs。"},
                 },
                 "required": ["title", "sheets"],
             },
@@ -2166,6 +2193,7 @@ TOOL_SCHEMAS: list[dict] = [
                             "required": ["heading", "html"],
                         },
                     },
+                    "target_dir": {"type": "string", "description": "可选。用户指定的保存文件夹路径，例如 ~/Desktop/Project Files。未提供时才使用默认 outputs。"},
                 },
                 "required": ["title", "sections"],
             },
@@ -2188,6 +2216,7 @@ TOOL_SCHEMAS: list[dict] = [
                         "type": ["object", "array", "null"],
                         "description": "页面需要展示的数据，任意 JSON 可序列化结构（对象或数组）。会内嵌到 HTML 里，JSX 通过 window.__APP_DATA__ 直接读取，无需网络请求。",
                     },
+                    "target_dir": {"type": "string", "description": "可选。用户指定的保存文件夹路径，例如 ~/Desktop/Project Files。未提供时才使用默认 outputs。"},
                 },
                 "required": ["title", "jsx_code"],
             },

@@ -265,11 +265,11 @@ def provider_for_model(model: str) -> Optional[str]:
     normalized = (model or "").lower()
     if "claude" in normalized or normalized.startswith("anthropic/"):
         return "anthropic"
-    if normalized.startswith("deepseek/"):
+    if "deepseek" in normalized:
         return "deepseek"
-    if normalized.startswith("openai/") or normalized.startswith("gpt-"):
+    if normalized.startswith("openai/") or normalized.startswith("gpt-") or normalized.startswith("o3"):
         return "openai"
-    if normalized.startswith("dashscope/") or normalized.startswith("qwen/"):
+    if normalized.startswith("dashscope/") or normalized.startswith("qwen/") or normalized.startswith("qwen-"):
         return "dashscope"
     return None
 

@@ -1331,16 +1331,6 @@
     </div>
 
     <div class="section">
-      <h3 id="modelSectionTitle">模型</h3>
-      <div class="row">
-        <select id="model"></select>
-        <button id="saveModel" type="button">切换</button>
-        <button id="openSetup" type="button">重新设置</button>
-      </div>
-      <div class="muted">建议：先选模型，再保存对应的 API key（或使用本地模型/托管模式）。</div>
-    </div>
-
-    <div class="section">
       <h3 id="routeSectionTitle">模型路由 / API Key</h3>
       <div class="row">
         <select id="route"></select>
@@ -1355,6 +1345,16 @@
         <button id="saveKey" class="primary" type="button">保存 Key</button>
       </div>
       <div id="keyStatus" class="status"></div>
+    </div>
+
+    <div class="section">
+      <h3 id="modelSectionTitle">模型</h3>
+      <div class="row">
+        <select id="model"></select>
+        <button id="saveModel" type="button">切换</button>
+        <button id="openSetup" type="button">重新设置</button>
+      </div>
+      <div class="muted">建议：先选择 API Provider / Key，再选择该服务商支持的模型。</div>
     </div>
 
     <div class="section">
@@ -1788,14 +1788,14 @@
         </div>
 
         <div id="ownApiPanel" class="section" style="margin-top:10px; display:none">
-          <h3>你的 API Key</h3>
+          <h3 id="ownApiKeyTitle">你的 API Key</h3>
           <div class="two-col">
             <div class="field">
-              <label>服务商（Provider）</label>
+              <label id="setupProviderLabel">服务商（Provider）</label>
               <select id="setupProvider"></select>
             </div>
             <div class="field">
-              <label>API Key</label>
+              <label id="setupApiKeyLabel">API Key</label>
               <input id="setupApiKey" type="password" placeholder="sk-... / sk-ant-... / ..." />
             </div>
           </div>
@@ -1991,10 +1991,24 @@
       activeTask: null,
       taskPoller: null,
       lastTaskHistory: null,
+      availableModels: [],
     };
     const DEFAULT_HOSTED_API_BASE = 'http://120.24.223.0';
     const DEFAULT_MODELS = ['deepseek-chat', 'deepseek/deepseek-chat', 'gpt-4o-mini', 'claude-sonnet-4-5', 'ollama/llama3.1'];
     const DEFAULT_PROVIDERS = ['deepseek', 'openai', 'anthropic'];
+    const BYO_PROVIDERS = ['openai', 'anthropic', 'deepseek', 'dashscope'];
+    const PROVIDER_MODEL_CATALOG = {
+      openai: ['gpt-4o-mini', 'gpt-4o', 'gpt-4.1-mini', 'gpt-4.1', 'o3-mini', 'o3'],
+      anthropic: ['claude-sonnet-4-5', 'claude-haiku-4-5', 'anthropic/claude-sonnet-4-5', 'anthropic/claude-haiku-4-5'],
+      deepseek: ['deepseek/deepseek-chat', 'deepseek/deepseek-reasoner', 'deepseek-chat'],
+      dashscope: ['dashscope/qwen-plus', 'dashscope/qwen-turbo', 'dashscope/qwen-max'],
+    };
+    const PROVIDER_DEFAULT_MODEL = {
+      openai: 'gpt-4o-mini',
+      anthropic: 'claude-sonnet-4-5',
+      deepseek: 'deepseek/deepseek-chat',
+      dashscope: 'dashscope/qwen-plus',
+    };
 
     const I18N = {
       zh: {
@@ -2064,12 +2078,21 @@
         modelTitle: '模型',
         switchModel: '切换',
         setupAgain: '重新设置',
-        modelHelp: '建议：先选模型，再保存对应的 API key（或使用本地模型/托管模式）。',
+        modelHelp: '建议：先选择 API Provider / Key，再选择该服务商支持的模型。',
         routeTitle: '模型路由 / API Key',
         save: '保存',
         apiKeyPlaceholder: '粘贴你的 API key（只保存在本地）',
         validate: '验证',
         saveKey: '保存 Key',
+        validatingKey: '验证中…',
+        keyValid: '验证成功 ✓',
+        keyInvalid: '验证失败：',
+        chooseModelFirst: '请先选择模型。',
+        chooseApiKeyFirst: '请先粘贴 API key。',
+        modelSwitched: '已切换模型。',
+        modelSwitchFailed: '切换失败：',
+        routeSaved: '已保存路由。',
+        keySavedByo: '已保存 ✓（并切换到 byo 路由）',
         languageTitle: '系统语言 / 权限',
         companionMode: '伙伴模式（沉浸）',
         capsuleMode: '胶囊模式（轻量）',
@@ -2153,6 +2176,7 @@
         refresh: '刷新',
         noMemories: '暂无候选记忆。',
         noLogs: '暂无日志。',
+        emptyReply: '没有收到模型输出。请检查模型/API 配置后重试。',
         confirm: '确认',
         reject: '拒绝',
         details: '详情',
@@ -2174,6 +2198,8 @@
         modelLabel: '模型（Model）',
         languageLabel: '语言（System Language）',
         providerLabel: '服务商（Provider）',
+        ownApiKeyTitle: '你的 API Key',
+        apiKeyLabel: 'API Key',
         hostedRegion: '服务区域',
         hostedUrl: 'API 服务器地址',
         email: '邮箱',
@@ -2400,12 +2426,21 @@
         modelTitle: 'Model',
         switchModel: 'Switch',
         setupAgain: 'Setup',
-        modelHelp: 'Tip: choose a model first, then save the matching API key, or use local/hosted mode.',
+        modelHelp: 'Tip: choose an API provider/key first, then choose a supported model for that provider.',
         routeTitle: 'Model Route / API Key',
         save: 'Save',
         apiKeyPlaceholder: 'Paste your API key (stored locally only)',
         validate: 'Validate',
         saveKey: 'Save Key',
+        validatingKey: 'Verifying…',
+        keyValid: 'Key is valid ✓',
+        keyInvalid: 'Verification failed: ',
+        chooseModelFirst: 'Choose a model first.',
+        chooseApiKeyFirst: 'Paste an API key first.',
+        modelSwitched: 'Model switched.',
+        modelSwitchFailed: 'Switch failed: ',
+        routeSaved: 'Route saved.',
+        keySavedByo: 'Saved ✓ and switched to BYO route.',
         languageTitle: 'Language / Permissions',
         companionMode: 'Companion mode',
         capsuleMode: 'Capsule mode',
@@ -2489,6 +2524,7 @@
         refresh: 'Refresh',
         noMemories: 'No memory candidates yet.',
         noLogs: 'No logs yet.',
+        emptyReply: 'No model output was received. Check the model/API configuration and try again.',
         confirm: 'Confirm',
         reject: 'Reject',
         details: 'Details',
@@ -2510,6 +2546,8 @@
         modelLabel: 'Model',
         languageLabel: 'System Language',
         providerLabel: 'Provider',
+        ownApiKeyTitle: 'Your API Key',
+        apiKeyLabel: 'API Key',
         hostedRegion: 'Service Region',
         hostedUrl: 'API Server URL',
         email: 'Email',
@@ -2823,6 +2861,9 @@
       if (labels[0]) labels[0].textContent = tr('modelLabel');
       if (labels[1]) labels[1].textContent = tr('languageLabel');
       if (labels[2]) labels[2].textContent = tr('providerLabel');
+      setText('#ownApiKeyTitle', tr('ownApiKeyTitle'));
+      setText('#setupProviderLabel', tr('providerLabel'));
+      setText('#setupApiKeyLabel', tr('apiKeyLabel'));
       if (labels[5]) labels[5].textContent = tr('hostedRegion');
       if (labels[6]) labels[6].textContent = tr('hostedUrl');
       if (labels[7]) labels[7].textContent = tr('email');
@@ -3869,13 +3910,13 @@
         if (toolIndicator) toolIndicator.remove();
 
         if (!agentBubble){
-          addBubble('agent', finalReply || '（无输出）', finalFiles);
+          addBubble('agent', finalReply || tr('emptyReply'), finalFiles);
         } else {
           // Final render: use the canonical reply from end event (already stripped of markers).
           // Fall back to a placeholder if both server reply and streamed buffer are empty
           // (avoids leaving an empty bubble or stranded typing dots).
           const rawFinal = (finalReply != null && finalReply !== '') ? finalReply : streamedText;
-          const finalText = rawFinal || '（无输出）';
+          const finalText = rawFinal || tr('emptyReply');
           // Keep streamedText consistent so any late rAF render won't overwrite this with stale content.
           streamedText = finalText;
           delete agentBubble.dataset.typing;
@@ -4016,6 +4057,67 @@
       el.className = 'status' + (kind ? ' ' + kind : '');
     }
 
+    function uniqueList(items){
+      const out = [];
+      (items || []).forEach(item => {
+        const value = String(item || '').trim();
+        if (value && !out.includes(value)) out.push(value);
+      });
+      return out;
+    }
+
+    function providerForModelName(model){
+      const normalized = String(model || '').trim().toLowerCase();
+      if (!normalized) return '';
+      if (normalized.includes('claude') || normalized.startsWith('anthropic/')) return 'anthropic';
+      if (normalized.startsWith('openai/') || normalized.startsWith('gpt-') || normalized.startsWith('o3')) return 'openai';
+      if (normalized.includes('deepseek')) return 'deepseek';
+      if (normalized.startsWith('dashscope/') || normalized.startsWith('qwen/')) return 'dashscope';
+      return '';
+    }
+
+    function modelsForProvider(provider, availableModels){
+      const key = String(provider || '').trim().toLowerCase();
+      const available = (availableModels || state.availableModels || DEFAULT_MODELS)
+        .filter(model => providerForModelName(model) === key);
+      return uniqueList([...(PROVIDER_MODEL_CATALOG[key] || []), ...available]);
+    }
+
+    function setSelectOptions(selectEl, options, selectedValue){
+      if (!selectEl) return '';
+      const previous = selectedValue || selectEl.value;
+      selectEl.innerHTML = '';
+      uniqueList(options).forEach(value => {
+        const opt = document.createElement('option');
+        opt.value = value;
+        opt.textContent = value;
+        if (value === previous) opt.selected = true;
+        selectEl.appendChild(opt);
+      });
+      if (!selectEl.value && selectEl.options.length) selectEl.selectedIndex = 0;
+      return selectEl.value || '';
+    }
+
+    function providerOptionsFrom(keysInfo){
+      const providers = (keysInfo?.providers && keysInfo.providers.length ? keysInfo.providers : DEFAULT_PROVIDERS)
+        .filter(provider => BYO_PROVIDERS.includes(String(provider || '').toLowerCase()));
+      return uniqueList([...providers, ...DEFAULT_PROVIDERS]);
+    }
+
+    function ensureProviderModel(provider, modelSelectId){
+      const key = String(provider || '').trim().toLowerCase();
+      const selectEl = $(modelSelectId);
+      if (!key || !selectEl) return selectEl?.value || '';
+      const models = modelsForProvider(key);
+      const current = models.includes(selectEl.value) ? selectEl.value : (PROVIDER_DEFAULT_MODEL[key] || models[0] || '');
+      return setSelectOptions(selectEl, models, current);
+    }
+
+    function syncModelsForProvider(providerSelectId, modelSelectId){
+      const provider = $(providerSelectId)?.value || '';
+      return ensureProviderModel(provider, modelSelectId);
+    }
+
     async function refreshSettings(){
       const [modelInfo, routeInfo, langInfo, permInfo, termInfo, calInfo, wsInfo, keysInfo] = await Promise.all([
         apiGet('/api/model'),
@@ -4030,15 +4132,8 @@
 
       // models
       const mSel = $('model');
-      mSel.innerHTML = '';
       const models = (modelInfo.available && modelInfo.available.length ? modelInfo.available : DEFAULT_MODELS);
-      models.forEach(m => {
-        const opt = document.createElement('option');
-        opt.value = m; opt.textContent = m;
-        if (m === modelInfo.model) opt.selected = true;
-        mSel.appendChild(opt);
-      });
-      if (!mSel.value && mSel.options.length) mSel.selectedIndex = 0;
+      state.availableModels = models;
 
       // route
       const rSel = $('route');
@@ -4052,12 +4147,10 @@
 
       // providers
       const pSel = $('provider');
-      pSel.innerHTML = '';
-      (keysInfo.providers && keysInfo.providers.length ? keysInfo.providers : DEFAULT_PROVIDERS).forEach(p => {
-        const opt = document.createElement('option');
-        opt.value = p; opt.textContent = p;
-        pSel.appendChild(opt);
-      });
+      const selectedProvider = providerForModelName(modelInfo.model) || pSel.value || DEFAULT_PROVIDERS[0];
+      setSelectOptions(pSel, providerOptionsFrom(keysInfo), selectedProvider);
+      const providerModels = modelsForProvider(pSel.value, models);
+      setSelectOptions(mSel, providerModels.length ? providerModels : models, modelInfo.model);
 
       // language & permissions
       $('uiMode').value = state.mode === 'capsule' ? 'capsule' : 'companion';
@@ -4259,24 +4352,15 @@
       $('setupAgentName').value = onb.agent_name || '';
       $('setupPersona').value = onb.persona || 'professional';
 
-      const mSel = $('setupModel');
-      mSel.innerHTML = '';
       const models = (modelInfo.available && modelInfo.available.length ? modelInfo.available : DEFAULT_MODELS);
-      models.forEach(m => {
-        const opt = document.createElement('option');
-        opt.value = m; opt.textContent = m;
-        if (m === (onb.model || modelInfo.model)) opt.selected = true;
-        mSel.appendChild(opt);
-      });
-      if (!mSel.value && mSel.options.length) mSel.selectedIndex = 0;
+      state.availableModels = models;
 
       const pSel = $('setupProvider');
-      pSel.innerHTML = '';
-      (keysInfo.providers && keysInfo.providers.length ? keysInfo.providers : DEFAULT_PROVIDERS).forEach(p => {
-        const opt = document.createElement('option');
-        opt.value = p; opt.textContent = p;
-        pSel.appendChild(opt);
-      });
+      const selectedModel = onb.model || modelInfo.model;
+      const selectedProvider = providerForModelName(selectedModel) || pSel.value || DEFAULT_PROVIDERS[0];
+      setSelectOptions(pSel, providerOptionsFrom(keysInfo), selectedProvider);
+      const providerModels = modelsForProvider(pSel.value, models);
+      setSelectOptions($('setupModel'), providerModels.length ? providerModels : models, selectedModel);
 
       // Load saved hosted session if exists
       try {
@@ -4319,12 +4403,12 @@
 
     async function validateKey(provider, apiKey, model, statusId){
       try{
-        setStatus(statusId, '验证中…', '');
+        setStatus(statusId, tr('validatingKey'), '');
         await apiPost('/api/api-keys/validate', {provider, api_key: apiKey, model});
-        setStatus(statusId, '验证成功 ✓', 'good');
+        setStatus(statusId, tr('keyValid'), 'good');
         return true;
       }catch(e){
-        setStatus(statusId, '验证失败：' + (e?.message || String(e)), 'bad');
+        setStatus(statusId, tr('keyInvalid') + (e?.message || String(e)), 'bad');
         return false;
       }
     }
@@ -4342,7 +4426,7 @@
 
       const payload = {
         mode,
-        model: $('setupModel').value,
+        model: mode === 'own_api' ? syncModelsForProvider('setupProvider', 'setupModel') : $('setupModel').value,
         provider: mode === 'own_api' ? $('setupProvider').value : (mode === 'hosted_api' ? 'auctus_hosted' : null),
         api_key: mode === 'own_api' ? $('setupApiKey').value.trim() : (mode === 'hosted_api' ? hostedSession.api_key : null),
         hosted_email: mode === 'hosted_api' ? hostedSession.email : null,
@@ -4473,31 +4557,35 @@
     $('saveModel').onclick = async () => {
       try{
         const model = $('model').value || DEFAULT_MODELS[0];
-        if (!model){ setStatus('keyStatus', '请先选择模型。', 'bad'); return; }
+        if (!model){ setStatus('keyStatus', tr('chooseModelFirst'), 'bad'); return; }
         await apiPost('/api/model', {model});
-        setStatus('keyStatus', '已切换模型。', 'good');
-      }catch(e){ setStatus('keyStatus', '切换失败：' + (e?.message || String(e)), 'bad'); }
+        setStatus('keyStatus', tr('modelSwitched'), 'good');
+      }catch(e){ setStatus('keyStatus', tr('modelSwitchFailed') + (e?.message || String(e)), 'bad'); }
     };
     $('saveRoute').onclick = async () => {
       try{
         await apiPost('/api/route', {route: $('route').value});
-        setStatus('keyStatus', '已保存路由。', 'good');
-      }catch(e){ setStatus('keyStatus', '保存失败：' + (e?.message || String(e)), 'bad'); }
+        setStatus('keyStatus', tr('routeSaved'), 'good');
+      }catch(e){ setStatus('keyStatus', tr('saveFailed')(e?.message || String(e)), 'bad'); }
     };
+    $('provider').onchange = () => syncModelsForProvider('provider', 'model');
     $('validateKey').onclick = async () => {
-      await validateKey($('provider').value, $('apiKey').value.trim(), $('model').value, 'keyStatus');
+      const model = syncModelsForProvider('provider', 'model');
+      await validateKey($('provider').value, $('apiKey').value.trim(), model, 'keyStatus');
     };
     $('saveKey').onclick = async () => {
       const provider = $('provider').value;
       const api_key = $('apiKey').value.trim();
-      if (!api_key){ setStatus('keyStatus', '请先粘贴 API key。', 'bad'); return; }
-      const ok = await validateKey(provider, api_key, $('model').value, 'keyStatus');
+      const model = syncModelsForProvider('provider', 'model');
+      if (!api_key){ setStatus('keyStatus', tr('chooseApiKeyFirst'), 'bad'); return; }
+      const ok = await validateKey(provider, api_key, model, 'keyStatus');
       if (!ok) return;
       try{
-        await apiPost('/api/api-keys', {provider, api_key});
+        await apiPost('/api/api-keys', {provider, api_key, model});
         $('apiKey').value = '';
-        setStatus('keyStatus', '已保存 ✓（并切换到 byo 路由）', 'good');
-      }catch(e){ setStatus('keyStatus', '保存失败：' + (e?.message || String(e)), 'bad'); }
+        setStatus('keyStatus', tr('keySavedByo'), 'good');
+        await refreshSettings().catch(()=>{});
+      }catch(e){ setStatus('keyStatus', tr('saveFailed')(e?.message || String(e)), 'bad'); }
     };
     $('saveLanguage').onclick = async () => {
       try{
@@ -4901,8 +4989,10 @@
       };
     });
     $('setupValidateKey').onclick = async () => {
-      await validateKey($('setupProvider').value, $('setupApiKey').value.trim(), $('setupModel').value, 'setupKeyStatus');
+      const model = syncModelsForProvider('setupProvider', 'setupModel');
+      await validateKey($('setupProvider').value, $('setupApiKey').value.trim(), model, 'setupKeyStatus');
     };
+    $('setupProvider').onchange = () => syncModelsForProvider('setupProvider', 'setupModel');
     $('wizardFinish').onclick = finishOnboarding;
     $('wizardClose').onclick = closeWizard;
 

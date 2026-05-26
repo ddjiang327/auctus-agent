@@ -79,6 +79,19 @@ class AgentOutputIsolationTests(unittest.TestCase):
         self.assertTrue(generated.exists())
         self.assertEqual(settings.output_dir, self.root / "outputs")
 
+    def test_stream_collect_accepts_message_content_chunks(self):
+        stream = iter([{"choices": [{"message": {"content": "hello"}}]}])
+
+        events = list(agent._stream_collect(stream))
+
+        self.assertEqual(events, [{"type": "text", "delta": "hello"}])
+
+    def test_stream_collect_rejects_empty_model_output(self):
+        stream = iter([{"choices": [{"delta": {}}]}])
+
+        with self.assertRaisesRegex(RuntimeError, "no model output"):
+            list(agent._stream_collect(stream))
+
     def test_chat_injects_evolution_runtime_context(self):
         final_response = {
             "model": "test-model",
@@ -762,7 +775,21 @@ class AgentOutputIsolationTests(unittest.TestCase):
 
         self.assertIn("/tmp/fit/fit.html", context)
         self.assertIn("必须调用 read_file", context)
+        self.assertIn("唯一可信数据源", context)
+        self.assertIn("禁止用旧/空 localStorage 覆盖文件内数据", context)
         self.assertIn("write_file 成功后", context)
+
+    def test_file_destination_context_requires_desktop_folder_question(self):
+        context = agent._file_destination_context("帮我建立一个文件", explicit_paths=[])
+
+        self.assertIn("必须先确认文件保存位置", context)
+        self.assertIn("要不要在桌面新建一个文件夹", context)
+        self.assertIn("不要调用 write_file", context)
+
+    def test_file_destination_context_skips_explicit_workspace(self):
+        context = agent._file_destination_context("帮我在当前文件夹建立一个文件", explicit_paths=[])
+
+        self.assertEqual(context, "")
 
     def test_record_write_task_does_not_accept_reply_without_write_file(self):
         first_reply_without_tools = {

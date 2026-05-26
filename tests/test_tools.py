@@ -395,6 +395,41 @@ class ToolSafetyTests(unittest.TestCase):
         self.assertEqual(result["filename"], "note.md")
         self.assertEqual(outside.read_text(encoding="utf-8"), "created")
 
+    def test_write_file_expands_home_directory_before_workspace_join(self):
+        home = self.root / "home"
+        target = home / "Desktop" / "note.md"
+        with patch.dict("os.environ", {"HOME": str(home)}):
+            with patch("app.tools.accounting.get_setup_state", return_value={"permission_scope": "full_computer"}):
+                result = tools.write_file("~/Desktop/note.md", "created")
+
+        self.assertEqual(Path(result["path"]), target.resolve())
+        self.assertEqual(target.read_text(encoding="utf-8"), "created")
+        self.assertNotIn(str(settings.workspace_dir), result["path"])
+
+    def test_make_report_can_write_to_user_target_directory(self):
+        target_dir = self.root / "Desktop" / "Auctus Files"
+        with patch("app.tools.accounting.get_setup_state", return_value={"permission_scope": "full_computer"}):
+            result = tools.make_markdown_report(
+                "Weekly Notes",
+                [{"heading": "Summary", "content": "Done"}],
+                target_dir=str(target_dir),
+            )
+
+        self.assertEqual(Path(result["path"]).parent, target_dir.resolve())
+        self.assertTrue(Path(result["path"]).exists())
+
+    def test_make_report_rejects_unauthorized_target_directory(self):
+        target_dir = self.root / "Desktop" / "Auctus Files"
+        with patch("app.tools.accounting.get_setup_state", return_value={"permission_scope": "workspace"}):
+            result = tools.make_markdown_report(
+                "Weekly Notes",
+                [{"heading": "Summary", "content": "Done"}],
+                target_dir=str(target_dir),
+            )
+
+        self.assertIn("error", result)
+        self.assertIn("outside authorized workspace", result["error"])
+
     def test_fetch_webpage_extracts_readable_html(self):
         class FakeResponse:
             headers = {"content-type": "text/html; charset=utf-8"}

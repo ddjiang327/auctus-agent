@@ -43,9 +43,11 @@ def _build_messages(
     extra_system_context: Optional[str] = None,
     intent_decision: Optional[dict] = None,
     model: str = "",
+    explicit_paths: Optional[list[Path]] = None,
 ) -> list[dict]:
     """组装一次完整调用所需的 messages：system + 摘要 + 历史 + 当前。"""
     intent_decision = intent_decision or intent.classify(user_text, extra_system_context=extra_system_context)
+    explicit_paths = explicit_paths if explicit_paths is not None else _extract_existing_paths(user_text)
     history = memory.load_history(session_id, limit=40)
     history = memory.prepare_history_for_turn(
         session_id,
@@ -104,6 +106,9 @@ def _build_messages(
     record_write_context = _persistent_record_write_context(user_text)
     if record_write_context:
         msgs.append({"role": "system", "content": record_write_context})
+    file_destination_context = _file_destination_context(user_text, explicit_paths=explicit_paths)
+    if file_destination_context:
+        msgs.append({"role": "system", "content": file_destination_context})
     if rag_ctx_future is not None:
         try:
             rag = rag_ctx_future.result()
@@ -153,6 +158,7 @@ def chat(
                     extra_system_context=extra_system_context,
                     intent_decision=intent_decision,
                     model=effective_model,
+                    explicit_paths=explicit_paths,
                 )
                 if explicit_paths:
                     msgs.insert(-1, {
@@ -352,7 +358,10 @@ def _stream_collect(stream: Iterator[dict]) -> Iterator[dict]:
         choices = chunk.get("choices") or []
         if not choices:
             continue
-        delta = choices[0].get("delta") or {}
+        choice = choices[0]
+        delta = choice.get("delta") or {}
+        if not delta and isinstance(choice.get("message"), dict):
+            delta = choice.get("message") or {}
         content_delta = delta.get("content")
         if content_delta:
             full_content += content_delta
@@ -381,7 +390,23 @@ def _stream_collect(stream: Iterator[dict]) -> Iterator[dict]:
         ai_msg["content"] = None
     if tool_calls_by_index:
         ai_msg["tool_calls"] = [tool_calls_by_index[i] for i in sorted(tool_calls_by_index.keys())]
+    elif not full_content:
+        raise RuntimeError(_empty_model_output_message())
     return {"ai_msg": ai_msg, "usage": usage, "model": used_model}
+
+
+def _empty_model_output_message() -> str:
+    route = accounting.current_route()
+    if route == "proxy":
+        hosted = accounting.hosted_account_summary()
+        if hosted.get("logged_in") and int(hosted.get("balance_cents") or 0) <= 0:
+            return "Hosted API returned no model output. Your hosted balance is 0; recharge or switch to Own API/local API key."
+        return "Proxy route returned no model output. Check the hosted API status or switch to Own API/local API key."
+    if route == "local":
+        return "Local route returned no model output. Check that the model API key is configured in .env or switch routes in Settings."
+    if route == "byo":
+        return "Own API route returned no model output. Check the saved API key and selected model."
+    return "The model returned no output."
 
 
 def chat_stream(
@@ -421,6 +446,7 @@ def chat_stream(
                     extra_system_context=extra_system_context,
                     intent_decision=intent_decision,
                     model=effective_model,
+                    explicit_paths=explicit_paths,
                 )
                 if explicit_paths:
                     msgs.insert(-1, {
@@ -954,8 +980,9 @@ def _workspace_context() -> str:
         f"- 当前终端命令权限：{terminal_access}。只有 enabled 且用户明确要求执行命令时，才可以使用 run_terminal_command 或 terminal_session_* 工具。\n"
         "- 当用户说“这个文件夹”“当前文件夹”“授权文件夹”“workspace”或类似表达时，"
         "默认指这个 workspace。\n"
-        "- 在当前 workspace 里创建或修改文本文件时，优先使用相对路径调用 write_file，"
-        "例如 `note.md` 或 `docs/note.md`，不要反问路径。\n"
+        "- 用户明确说在当前 workspace/当前文件夹里创建或修改文本文件时，优先使用相对路径调用 write_file，"
+        "例如 `note.md` 或 `docs/note.md`，不要反问路径。若用户泛泛要求生成普通交付文件且没说保存位置，"
+        "先询问是否在桌面创建专门文件夹以及文件夹名。\n"
         "- 如果用户给出网页 URL 或要求读取网页，优先使用 fetch_webpage 工具。\n"
         "- 如果用户要求查询价格、新闻或实时网页信息但没有提供 URL，先使用 search_web，再用 fetch_webpage 打开相关页面；不要连续猜测 URL。\n"
         "- 只有 fetch_webpage 无法读取、页面依赖 JavaScript、需要点击/输入/登录，或用户明确要求打开网页时，才使用 browser_open。后台检索不要打扰用户桌面。\n"
@@ -1123,10 +1150,70 @@ def _persistent_record_write_context(user_text: str) -> str:
         f"- 本轮用户是在追加一条 {label} 记录，不是普通聊天。\n"
         f"- 目标文件路径：{path}\n"
         "- 必须调用 read_file 读取这个文件，然后调用 write_file 覆盖同一个路径，把本轮新记录追加进文件内的数据结构。\n"
-        "- 如果文件使用 localStorage，也必须同步更新文件内的固定数据数组或 JSON 数据区；不能只依赖浏览器 localStorage。\n"
+        "- 文件内的固定数据数组或 JSON 数据区是唯一可信数据源；必须把新记录写进这个内嵌数据区，不能只写 localStorage。\n"
+        "- 如果 HTML 使用 localStorage，页面加载时必须先读取并渲染文件内数据；localStorage 只能补充合并缺失记录或在文件内数据为空时兜底，禁止用旧/空 localStorage 覆盖文件内数据。\n"
+        "- 如果 read_file 后发现旧 HTML 是 localStorage 优先加载，必须在本次 write_file 中一并修正初始化逻辑，不要让用户手动清理浏览器 localStorage。\n"
         "- 只有 write_file 成功后，才可以回复已记录，并在回复里提到写入的准确路径。\n"
         "- 如果 read_file 或 write_file 失败，必须明确说没有记录成功，不要口头确认。"
     )
+
+
+def _file_destination_context(user_text: str, explicit_paths: list[Path] | None = None) -> str:
+    text = (user_text or "").strip().lower()
+    if not text or explicit_paths:
+        return ""
+    if _persistent_record_write_context(user_text):
+        return ""
+    if not _looks_like_new_file_creation_request(text):
+        return ""
+    return (
+        "[必须先确认文件保存位置]\n"
+        "- 本轮用户要求新建/生成文件，但没有提供明确保存路径。\n"
+        "- 不要调用 write_file、make_markdown_report、make_spreadsheet、make_webpage、make_react_prototype 或其它会落盘的工具。\n"
+        "- 必须先简短询问：要不要在桌面新建一个文件夹来放这些文件？文件夹叫什么？\n"
+        "- 用户回答文件夹名后，优先使用 `~/Desktop/<文件夹名>/...` 写入；如果用户明确说不需要桌面文件夹，再使用当前 workspace 或用户指定路径。\n"
+        "- 如果用户已经在消息里明确说“在当前文件夹/workspace/授权文件夹里建”，才可以不询问桌面文件夹。"
+    )
+
+
+def _looks_like_new_file_creation_request(text: str) -> bool:
+    if any(token in text for token in ("当前文件夹", "这个文件夹", "workspace", "授权文件夹", "current folder")):
+        return False
+    create_words = (
+        "建立",
+        "创建",
+        "新建",
+        "生成",
+        "做一个",
+        "做个",
+        "写一个",
+        "建一个",
+        "create",
+        "make",
+        "generate",
+        "build",
+    )
+    file_words = (
+        "文件",
+        "报告",
+        "表格",
+        "网页",
+        "html",
+        "markdown",
+        "md",
+        "excel",
+        "xlsx",
+        "csv",
+        "json",
+        "小工具",
+        "原型",
+        "file",
+        "report",
+        "spreadsheet",
+        "webpage",
+        "prototype",
+    )
+    return any(word in text for word in create_words) and any(word in text for word in file_words)
 
 
 def _looks_like_persistent_record_write(text: str) -> bool:
