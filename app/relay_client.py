@@ -1,6 +1,6 @@
 """
 Relay client — connects desktop agent to the cloud relay server.
-Reads RELAY_URL and RELAY_TOKEN from config. If not set, does nothing.
+Reads MOBILE_RELAY_URL and MOBILE_RELAY_ADMIN_SECRET from config. If not set, does nothing.
 
 Message protocol (JSON):
   Mobile → Desktop: {"type": "message", "session_id": "...", "content": "..."}
@@ -13,11 +13,22 @@ import asyncio
 import json
 import logging
 import threading
+import urllib.request
+from urllib.parse import urlparse, urlunparse
 from typing import Callable, Optional
 
 log = logging.getLogger(__name__)
 
 RECONNECT_DELAY = 5  # seconds between reconnect attempts
+HEALTH_CHECK_INTERVAL = 30  # seconds between relay registry checks
+HEALTH_CHECK_TIMEOUT = 8  # seconds for /relay/health
+
+
+def _health_url_for(relay_url: str) -> str:
+    parsed = urlparse(relay_url.rstrip("/"))
+    scheme = "https" if parsed.scheme == "wss" else "http"
+    base = urlunparse((scheme, parsed.netloc, parsed.path.rstrip("/"), "", "", ""))
+    return f"{base}/relay/health"
 
 
 class RelayClient:
@@ -43,6 +54,8 @@ class RelayClient:
             f"{relay_url.rstrip('/')}/relay/ws/desktop"
             f"?admin_secret={admin_secret}&device_token={device_token}"
         )
+        self._health_url = _health_url_for(relay_url)
+        self._device_token_prefix = device_token[:8]
         self._on_message = on_message
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._ws = None
@@ -81,14 +94,55 @@ class RelayClient:
 
         while self._running:
             try:
-                async with websockets.connect(self._ws_url, ping_interval=30) as ws:
+                async with websockets.connect(
+                    self._ws_url,
+                    ping_interval=20,
+                    ping_timeout=20,
+                    close_timeout=5,
+                ) as ws:
                     self._ws = ws
                     log.info("[Relay] Connected to relay server")
-                    await self._recv_loop(ws)
+                    await self._serve_connection(ws)
             except Exception as e:
                 log.warning("[Relay] Disconnected: %s — retrying in %ds", e, RECONNECT_DELAY)
                 self._ws = None
                 await asyncio.sleep(RECONNECT_DELAY)
+
+    async def _serve_connection(self, ws) -> None:
+        recv_task = asyncio.create_task(self._recv_loop(ws))
+        health_task = asyncio.create_task(self._health_loop(ws))
+        tasks = {recv_task, health_task}
+        try:
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+            for task in done:
+                exc = task.exception()
+                if exc:
+                    raise exc
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            self._ws = None
+
+    async def _health_loop(self, ws) -> None:
+        while self._running:
+            await asyncio.sleep(HEALTH_CHECK_INTERVAL)
+            if not await asyncio.to_thread(self._is_registered_online):
+                log.warning("[Relay] Health check says desktop is offline; reconnecting")
+                await ws.close()
+                raise ConnectionError("relay registry lost desktop connection")
+
+    def _is_registered_online(self) -> bool:
+        try:
+            req = urllib.request.Request(self._health_url, headers={"Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=HEALTH_CHECK_TIMEOUT) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except Exception as e:
+            log.warning("[Relay] Health check failed: %s", e)
+            return False
+
+        device = (data.get("devices") or {}).get(self._device_token_prefix)
+        return bool(device and device.get("desktop_online"))
 
     async def _recv_loop(self, ws) -> None:
         async for raw in ws:
@@ -133,7 +187,7 @@ _client: Optional[RelayClient] = None
 
 def start_relay_client(on_message: Callable[[str, str], str]) -> None:
     """
-    Call once at server startup. Reads RELAY_URL and RELAY_TOKEN from settings.
+    Call once at server startup. Reads mobile relay settings.
     Does nothing if either is not configured.
     """
     global _client
