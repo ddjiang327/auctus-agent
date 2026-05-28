@@ -22,6 +22,7 @@ log = logging.getLogger(__name__)
 RECONNECT_DELAY = 5  # seconds between reconnect attempts
 HEALTH_CHECK_INTERVAL = 30  # seconds between relay registry checks
 HEALTH_CHECK_TIMEOUT = 8  # seconds for /relay/health
+DESKTOP_HEARTBEAT_INTERVAL = 20  # seconds between app-level relay pings
 
 
 def _health_url_for(relay_url: str) -> str:
@@ -111,7 +112,8 @@ class RelayClient:
     async def _serve_connection(self, ws) -> None:
         recv_task = asyncio.create_task(self._recv_loop(ws))
         health_task = asyncio.create_task(self._health_loop(ws))
-        tasks = {recv_task, health_task}
+        heartbeat_task = asyncio.create_task(self._heartbeat_loop(ws))
+        tasks = {recv_task, health_task, heartbeat_task}
         try:
             done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
             for task in done:
@@ -131,6 +133,11 @@ class RelayClient:
                 log.warning("[Relay] Health check says desktop is offline; reconnecting")
                 await ws.close()
                 raise ConnectionError("relay registry lost desktop connection")
+
+    async def _heartbeat_loop(self, ws) -> None:
+        while self._running:
+            await ws.send(json.dumps({"type": "desktop_ping"}))
+            await asyncio.sleep(DESKTOP_HEARTBEAT_INTERVAL)
 
     def _is_registered_online(self) -> bool:
         try:
