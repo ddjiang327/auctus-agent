@@ -29,7 +29,7 @@ class Settings(BaseSettings):
 
     # Mobile relay (cloud bridge to mobile app)
     mobile_relay_url: Optional[str] = None          # e.g. ws://120.24.223.0
-    mobile_relay_admin_secret: Optional[str] = None # server admin secret, baked into app
+    mobile_relay_admin_secret: Optional[str] = None # legacy private-relay secret
     mobile_relay_token: Optional[str] = None        # legacy name for mobile_relay_admin_secret
     mobile_relay_device_token: Optional[str] = None # this desktop's unique token (shown as QR)
 

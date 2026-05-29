@@ -27,7 +27,7 @@ from contextlib import asynccontextmanager
 
 def _ensure_device_token() -> None:
     """Generate and persist MOBILE_RELAY_DEVICE_TOKEN on first run."""
-    if not (settings.mobile_relay_url and settings.mobile_relay_admin_secret):
+    if not settings.mobile_relay_url:
         return
     if settings.mobile_relay_device_token:
         return
@@ -1930,7 +1930,7 @@ async function updateMobileStatus() {
     // Settings panel status text
     if (mobileSettingsStatus) {
       if (!configured) {
-        mobileSettingsStatus.textContent = '未配置：请先在 .env 中设置 MOBILE_RELAY_URL 和 MOBILE_RELAY_ADMIN_SECRET';
+        mobileSettingsStatus.textContent = '未配置：请先在 .env 中设置 MOBILE_RELAY_URL';
       } else if (connected) {
         mobileSettingsStatus.textContent = '✓ 已连接';
         mobileSettingsStatus.style.color = '#2c6e28';
@@ -4330,9 +4330,8 @@ def mobile_status():
 def pairing_info():
     """Returns the data needed to generate a mobile pairing QR code."""
     relay_url = settings.mobile_relay_url or ""
-    admin_secret = settings.mobile_relay_admin_secret or ""
     device_token = settings.mobile_relay_device_token or ""
-    configured = bool(relay_url and admin_secret and device_token)
+    configured = bool(relay_url and device_token)
     return {
         "configured": configured,
         "relay_url": relay_url,
@@ -4351,9 +4350,8 @@ def pairing_qr():
         raise HTTPException(503, "qrcode package not installed")
 
     relay_url = settings.mobile_relay_url or ""
-    admin_secret = settings.mobile_relay_admin_secret or ""
     device_token = settings.mobile_relay_device_token or ""
-    if not relay_url or not admin_secret or not device_token:
+    if not relay_url or not device_token:
         raise HTTPException(404, "Relay not configured")
 
     import json as _json
@@ -4368,22 +4366,21 @@ def pairing_qr():
 @app.get("/pair", response_class=HTMLResponse)
 def pair_page(lang: str = "zh"):
     relay_url = settings.mobile_relay_url or ""
-    admin_secret = settings.mobile_relay_admin_secret or ""
     device_token = settings.mobile_relay_device_token or ""
-    configured = bool(relay_url and admin_secret and device_token)
+    configured = bool(relay_url and device_token)
     is_en = lang.startswith("en")
 
     if not configured:
         if is_en:
             qr_section = """<div style="color:#f85149;padding:20px;font-size:14px">
                 Relay not configured<br>
-                <small style="color:#8b949e">Set MOBILE_RELAY_URL and MOBILE_RELAY_ADMIN_SECRET in .env</small>
+                <small style="color:#8b949e">Set MOBILE_RELAY_URL in .env</small>
             </div>"""
             token_text = "Not configured"
         else:
             qr_section = """<div style="color:#f85149;padding:20px;font-size:14px">
                 中继服务未配置<br>
-                <small style="color:#8b949e">请在 .env 中设置 MOBILE_RELAY_URL 和 MOBILE_RELAY_ADMIN_SECRET</small>
+                <small style="color:#8b949e">请在 .env 中设置 MOBILE_RELAY_URL</small>
             </div>"""
             token_text = "未配置"
     else:

@@ -1,6 +1,6 @@
 """
 Relay client — connects desktop agent to the cloud relay server.
-Reads MOBILE_RELAY_URL and MOBILE_RELAY_ADMIN_SECRET from config. If not set, does nothing.
+Reads MOBILE_RELAY_URL and a per-desktop MOBILE_RELAY_DEVICE_TOKEN from config.
 
 Message protocol (JSON):
   Mobile → Desktop: {"type": "message", "session_id": "...", "content": "..."}
@@ -14,7 +14,7 @@ import json
 import logging
 import threading
 import urllib.request
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlencode, urlparse, urlunparse
 from typing import Callable, Optional
 
 log = logging.getLogger(__name__)
@@ -47,14 +47,14 @@ class RelayClient:
     ) -> None:
         """
         relay_url    : base WebSocket URL, e.g. "ws://120.24.223.0"
-        admin_secret : server-side secret, baked into app bundle
+        admin_secret : optional legacy server-side secret
         device_token : this desktop's unique token, shown as QR code
         on_message   : sync callable(session_id, content) → reply string
         """
-        self._ws_url = (
-            f"{relay_url.rstrip('/')}/relay/ws/desktop"
-            f"?admin_secret={admin_secret}&device_token={device_token}"
-        )
+        query = {"device_token": device_token}
+        if admin_secret:
+            query["admin_secret"] = admin_secret
+        self._ws_url = f"{relay_url.rstrip('/')}/relay/ws/desktop?{urlencode(query)}"
         self._health_url = _health_url_for(relay_url)
         self._device_token_prefix = device_token[:8]
         self._on_message = on_message
@@ -195,7 +195,7 @@ _client: Optional[RelayClient] = None
 def start_relay_client(on_message: Callable[[str, str], str]) -> None:
     """
     Call once at server startup. Reads mobile relay settings.
-    Does nothing if either is not configured.
+    Does nothing if the relay URL or device token is not configured.
     """
     global _client
 
@@ -205,7 +205,7 @@ def start_relay_client(on_message: Callable[[str, str], str]) -> None:
     admin_secret = settings.mobile_relay_admin_secret or ""
     device_token = settings.mobile_relay_device_token or ""
 
-    if not relay_url or not admin_secret or not device_token:
+    if not relay_url or not device_token:
         log.info("[Relay] Mobile relay not fully configured — relay disabled")
         return
 
@@ -228,6 +228,5 @@ def is_relay_configured() -> bool:
     from .config import settings
     return bool(
         settings.mobile_relay_url
-        and settings.mobile_relay_admin_secret
         and settings.mobile_relay_device_token
     )
