@@ -19,6 +19,14 @@ fi
 echo "Installing PyInstaller..."
 .venv/bin/pip install pyinstaller --quiet --upgrade
 
+echo "Warming tiktoken cache..."
+.venv/bin/python - <<'PY'
+import tiktoken
+
+for name in ("cl100k_base", "o200k_base", "p50k_base", "r50k_base"):
+    tiktoken.get_encoding(name)
+PY
+
 echo "Running PyInstaller (this takes a few minutes)..."
 .venv/bin/pyinstaller auctus-agent.spec --clean --noconfirm
 
