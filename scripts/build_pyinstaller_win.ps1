@@ -35,10 +35,7 @@ New-Item -ItemType Directory -Force -Path "$OutDir\_app" | Out-Null
 
 # App files go into _app\ (hidden from user, just like Mac's _app/)
 Copy-Item -Recurse "$DistSrc\*" "$OutDir\_app\"
-if (Test-Path ".env") {
-  Copy-Item ".env" "$OutDir\_app\"
-  Write-Host "Copied .env -> $OutDir\_app\.env"
-}
+Remove-Item "$OutDir\_app\.env" -Force -ErrorAction SilentlyContinue
 Copy-Item ".env.example" "$OutDir\_app\"
 New-Item -ItemType Directory -Force -Path "$OutDir\_app\prompts" | Out-Null
 Copy-Item "prompts\system.md" "$OutDir\_app\prompts\"

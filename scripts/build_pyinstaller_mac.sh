@@ -32,16 +32,11 @@ if [ -d "$OUT_DIR" ]; then
 fi
 mkdir -p "$OUT_DIR/_app"
 
-# Copy .env into dist so the local build picks up real credentials.
-if [ -f ".env" ]; then
-  cp .env "$DIST_SRC/.env"
-  echo "Copied .env → $DIST_SRC/.env"
-fi
+# Never ship local credentials or user setup state.
+rm -f "$DIST_SRC/.env"
 
 # Binary + libs go into _app/ (hidden from user)
 cp -R "$DIST_SRC/"* "$OUT_DIR/_app/"
-# cp -R misses dotfiles; copy explicitly
-[ -f "$DIST_SRC/.env" ] && cp "$DIST_SRC/.env" "$OUT_DIR/_app/.env"
 cp .env.example "$OUT_DIR/_app/"
 mkdir -p "$OUT_DIR/_app/prompts"
 cp prompts/system.md "$OUT_DIR/_app/prompts/"
