@@ -72,6 +72,41 @@ def get(session_id: str) -> dict[str, Any] | None:
     return _TASKS.get(session_id) or _load(session_id)
 
 
+def live_view(session_id: str) -> dict[str, Any] | None:
+    """结构化执行轨迹，供「执行实况」视图使用（只读，不修改任务）。
+
+    返回 goal/status/current_step + 步骤清单 + 可观察的活动时间线 + 产物。
+    截图等文件 URL 由调用方（server）补充，这里只负责任务本身的状态。
+    无任务时返回 None。
+    """
+    task = get(session_id)
+    if not task:
+        return None
+    steps = [
+        {"id": s.get("id"), "title": s.get("title"), "status": s.get("status")}
+        for s in (task.get("steps") or [])
+        if isinstance(s, dict)
+    ]
+    activity = [
+        {"time": a.get("time"), "text": a.get("text"), "key": a.get("key")}
+        for a in (task.get("activity") or [])
+        if isinstance(a, dict)
+    ]
+    artifacts = (task.get("artifacts") or {}).get("items") or []
+    return {
+        "session_id": task.get("session_id") or session_id,
+        "id": task.get("id"),
+        "goal": task.get("goal") or "",
+        "status": task.get("status") or "in_progress",
+        "current_step": int(task.get("current_step") or 0),
+        "steps": steps,
+        "activity": activity,
+        "artifacts": artifacts if isinstance(artifacts, list) else [],
+        "created_at": task.get("created_at") or "",
+        "updated_at": task.get("updated_at") or "",
+    }
+
+
 def list_tasks(limit: int = 20) -> list[dict[str, Any]]:
     _ensure_store()
     limit = max(1, min(int(limit or 20), 100))

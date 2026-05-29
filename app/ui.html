@@ -229,7 +229,7 @@
       min-height:0;
       display:flex;
       justify-content:center;
-      padding:18px 16px 96px;
+      padding:14px 16px 104px;
       overflow:hidden;
     }
     .stateflow{
@@ -601,8 +601,8 @@
       display:flex;
       gap:10px;
       align-items:flex-end;
-      padding:10px 10px;
-      border-radius: 999px;
+      padding:8px 12px;
+      border-radius: 28px;
       border:1px solid rgba(255,255,255,.12);
       background: rgba(12,16,28,.55);
       backdrop-filter: blur(16px);
@@ -638,12 +638,33 @@
     .send-col{
       display:flex;
       flex-direction:column;
-      gap:8px;
+      gap:6px;
       align-items:stretch;
     }
     .send-col .send{
       width: 100%;
       min-width: 112px;
+    }
+    .send-secondary{
+      display:flex;
+      gap:6px;
+    }
+    .send-secondary .send{
+      width:auto;
+      flex:1;
+      min-width:0;
+      padding:5px 8px;
+      font-size:12px;
+      color: rgba(234,240,255,.66);
+      box-shadow:none;
+      background: rgba(255,255,255,.04);
+    }
+    .left-controls{
+      display:flex;
+      flex-direction:column;
+      gap:6px;
+      flex:none;
+      align-items:stretch;
     }
     .mode-toggle{
       flex:none;
@@ -1199,6 +1220,7 @@
         <div id="mobileStatusIndicator" style="display:flex;align-items:center"></div>
         <button id="openFiles" type="button" title="我的文件">📁 文件</button>
         <button id="openHistory" type="button" title="对话历史">📜 历史</button>
+        <button id="openNotifs" type="button" title="后台任务通知" style="position:relative"><span id="notifsLabel">🔔 通知</span><span id="notifsBadge" style="display:none;position:absolute;top:-6px;right:-6px;min-width:16px;height:16px;line-height:16px;padding:0 4px;border-radius:9px;background:#FF4D4F;color:#fff;font-size:10px;text-align:center">0</span></button>
         <button id="openStats" type="button" title="使用统计">📊 统计</button>
         <button id="openAudit" type="button" title="操作日志">📋 日志</button>
         <button id="openSettings" type="button" title="设置">⚙ 设置</button>
@@ -1217,19 +1239,21 @@
 
     <form class="composer" id="chatForm">
       <div class="input-wrap">
-        <button class="mode-toggle" id="taskModeBtn" type="button">Task Mode: Off</button>
+        <div class="left-controls">
+          <button class="mic-btn ghost" id="micBtn" type="button" title="语音输入（按住说话）">🎤</button>
+          <button class="mode-toggle" id="taskModeBtn" type="button">Task Mode: Off</button>
+        </div>
         <textarea id="message" placeholder="像对一个伙伴下指令：例如“读取 test_prd.md 并生成总结”" rows="1"></textarea>
-        <button class="mic-btn ghost" id="micBtn" type="button" title="语音输入（按住说话）">🎤</button>
       </div>
       <div class="send-col">
-        <button class="send" id="newlineBtn" type="button">
-          <span>换行</span>
-          <span class="kbd">Shift↵</span>
-        </button>
         <button class="primary send" id="sendBtn">
           <span>发送</span>
           <span class="kbd">Enter</span>
         </button>
+        <div class="send-secondary">
+          <button class="send" id="newlineBtn" type="button"><span>换行</span></button>
+          <button class="send" id="bgRunBtn" type="button" title="把当前指令交给后台跑，完成后通知你"><span>后台跑</span></button>
+        </div>
       </div>
     </form>
   </div>
@@ -1266,6 +1290,22 @@
     </div>
   </div>
 
+  <!-- Notifications Panel -->
+  <div id="notifsBackdrop" class="backdrop"></div>
+  <div id="notifsPanel" class="side-panel" aria-label="后台任务通知">
+    <div class="side-panel-head">
+      <h2>🔔 后台任务</h2>
+      <button id="closeNotifs" class="ghost" type="button">关闭</button>
+    </div>
+    <div class="side-panel-body">
+      <div class="panel-search">
+        <button id="refreshNotifs" type="button">刷新</button>
+        <button id="markAllNotifs" type="button">全部已读</button>
+      </div>
+      <div id="notifsList"></div>
+    </div>
+  </div>
+
   <!-- Stats Panel -->
   <div id="statsBackdrop" class="backdrop"></div>
   <div id="statsPanel" class="side-panel" aria-label="使用统计">
@@ -1275,9 +1315,9 @@
     </div>
     <div class="side-panel-body">
       <div class="stats-grid" id="statsCards"></div>
-      <div class="stats-section-title">过去 7 天调用量</div>
+      <div class="stats-section-title" id="statsWeeklyTitle">过去 7 天调用量</div>
       <div class="daily-chart" id="dailyChart"></div>
-      <div class="stats-section-title">常用工具 Top 5</div>
+      <div class="stats-section-title" id="statsTopToolsTitle">常用工具 Top 5</div>
       <div id="statsTopTools"></div>
     </div>
   </div>
@@ -1990,6 +2030,7 @@
       taskMode: false,
       activeTask: null,
       taskPoller: null,
+      taskScreenshots: [],
       lastTaskHistory: null,
       availableModels: [],
     };
@@ -2031,6 +2072,12 @@
         taskModeOffTitle: '普通快速回答。打开后适合研究、比较和购买决策',
         taskPanelStatus: '任务模式',
         taskPanelCompleted: '已完成',
+        taskLiveView: '执行实况',
+        notifsBtn: '🔔 通知',
+        notifsPanelTitle: '🔔 后台任务',
+        notifMarkAll: '全部已读',
+        bgRunBtn: '后台跑',
+        historySearchPlaceholder: '关键词搜索…',
         taskDefaultGoal: '当前任务',
         taskActivityPreparing: '正在准备任务清单',
         taskActivityEntered: '已进入任务模式',
@@ -2379,6 +2426,12 @@
         taskModeOffTitle: 'Fast answers by default. Turn this on for research, comparisons, and purchase decisions.',
         taskPanelStatus: 'Task Mode',
         taskPanelCompleted: 'Completed',
+        taskLiveView: 'Live view',
+        notifsBtn: '🔔 Notifications',
+        notifsPanelTitle: '🔔 Background Tasks',
+        notifMarkAll: 'Mark all read',
+        bgRunBtn: 'Run in BG',
+        historySearchPlaceholder: 'Search keywords…',
         taskDefaultGoal: 'Current task',
         taskActivityPreparing: 'Preparing the task checklist',
         taskActivityEntered: 'Task Mode started',
@@ -2939,13 +2992,19 @@
       setText('#closeStats', tr('close'));
       setText('#closeAudit', tr('close'));
       setPlaceholder('filesSearch', tr('filesSearchPlaceholder'));
+      setPlaceholder('historySearch', tr('historySearchPlaceholder'));
       setText('#refreshFiles', tr('refresh'));
       setText('#refreshHistory', tr('refresh'));
       setText('#refreshAudit', tr('refresh'));
-      const _statsWeekly = document.querySelector('#statsPanel .stats-section-title:first-of-type');
-      if (_statsWeekly) _statsWeekly.textContent = tr('statsWeeklyLabel');
-      const _statsTopTools = document.querySelector('#statsPanel .stats-section-title:last-of-type');
-      if (_statsTopTools) _statsTopTools.textContent = tr('statsTopToolsLabel');
+      // Background tasks / notifications (priority A)
+      setText('#notifsLabel', tr('notifsBtn'));
+      setText('#notifsPanel h2', tr('notifsPanelTitle'));
+      setText('#closeNotifs', tr('close'));
+      setText('#refreshNotifs', tr('refresh'));
+      setText('#markAllNotifs', tr('notifMarkAll'));
+      setText('#bgRunBtn span', tr('bgRunBtn'));
+      setText('#statsWeeklyTitle', tr('statsWeeklyLabel'));
+      setText('#statsTopToolsTitle', tr('statsTopToolsLabel'));
       setPlaceholder('auditSearch', tr('auditSearchPlaceholder'));
       setOptionText('auditRiskFilter', '', tr('auditRiskAll'));
       setOptionText('auditRiskFilter', 'low', tr('auditRiskLow'));
@@ -3071,6 +3130,13 @@
             ${artifacts.length ? `<div class="task-history-meta">${esc(tr('taskHistoryArtifacts')(artifacts.length))}</div>` : ''}
           </div>
           ${activityItems.length ? `<div class="task-timeline">${activityItems.map(item => `<div class="task-timeline-item ${esc(item.key || '')}"><span class="task-timeline-dot"></span><span class="task-timeline-text">${esc(taskActivityText(item))}</span></div>`).join('')}</div>` : ''}
+          ${(state.taskScreenshots && state.taskScreenshots.length) ? `
+            <div style="margin-top:10px">
+              <div style="font-size:11px;color:var(--muted);margin-bottom:5px">${esc(tr('taskLiveView'))}</div>
+              <div style="display:flex;gap:6px;overflow-x:auto;padding-bottom:4px">
+                ${state.taskScreenshots.slice(0, 8).map(s => `<a href="${esc(s.url)}" target="_blank" rel="noopener" style="flex:0 0 auto"><img src="${esc(s.url)}" loading="lazy" alt="screenshot" style="height:74px;border-radius:6px;border:1px solid var(--stroke);display:block"></a>`).join('')}
+              </div>
+            </div>` : ''}
           ${artifacts.length ? `
             <div class="task-artifacts">
               <div class="task-artifacts-head">
@@ -3167,8 +3233,11 @@
       if (!state.sessionId) return;
       state.taskPoller = setInterval(async () => {
         try{
-          const j = await apiGet(`/api/task/${encodeURIComponent(state.sessionId)}`);
-          if (j.task) renderTaskPanel(j.task);
+          const j = await apiGet(`/api/task/${encodeURIComponent(state.sessionId)}/live`);
+          if (j.task){
+            state.taskScreenshots = j.screenshots || [];
+            renderTaskPanel(j.task);
+          }
         }catch(e){}
       }, 900);
     }
@@ -5624,7 +5693,8 @@
       function fmtCost(c) { return '$' + (c || 0).toFixed(3); }
 
       async function loadStats() {
-        statsCards.innerHTML = '<div class="panel-empty">正在加载…</div>';
+        const sl = (zh, en) => state.language === 'en' ? en : zh;
+        statsCards.innerHTML = `<div class="panel-empty">${sl('正在加载…', 'Loading...')}</div>`;
         dailyChart.innerHTML = '';
         topTools.innerHTML = '';
         try {
@@ -5632,10 +5702,10 @@
           const d = await r.json();
           const w = d.week || {};
           statsCards.innerHTML = [
-            { val: fmt(w.calls || 0), label: '本周调用次数' },
-            { val: fmtCost(w.cost), label: '本周费用' },
-            { val: fmt(d.sessions_total || 0), label: '历史对话' },
-            { val: fmt(d.files_total || 0), label: '输出文件' },
+            { val: fmt(w.calls || 0), label: sl('本周调用次数', 'Calls this week') },
+            { val: fmtCost(w.cost), label: sl('本周费用', 'Cost this week') },
+            { val: fmt(d.sessions_total || 0), label: sl('历史对话', 'Conversations') },
+            { val: fmt(d.files_total || 0), label: sl('输出文件', 'Output files') },
           ].map(c => `<div class="stat-card"><div class="stat-card-val">${c.val}</div><div class="stat-card-label">${c.label}</div></div>`).join('');
 
           const days = d.daily || [];
@@ -5665,10 +5735,10 @@
               </div>`;
             }).join('');
           } else {
-            topTools.innerHTML = '<div class="panel-empty" style="padding:8px 0">暂无工具调用记录</div>';
+            topTools.innerHTML = `<div class="panel-empty" style="padding:8px 0">${sl('暂无工具调用记录', 'No tool usage yet')}</div>`;
           }
         } catch (e) {
-          statsCards.innerHTML = '<div class="panel-empty">加载失败，请重试</div>';
+          statsCards.innerHTML = `<div class="panel-empty">${sl('加载失败，请重试', 'Load failed. Please try again.')}</div>`;
         }
       }
     })();
@@ -6240,6 +6310,115 @@
 
       recog.addEventListener('end', stopRecording);
       recog.addEventListener('error', stopRecording);
+    })();
+
+    // ====== Background tasks + notifications ======
+    (function initNotificationsPanel() {
+      const panel = document.getElementById('notifsPanel');
+      const backdrop = document.getElementById('notifsBackdrop');
+      const openBtn = document.getElementById('openNotifs');
+      const closeBtn = document.getElementById('closeNotifs');
+      const refreshBtn = document.getElementById('refreshNotifs');
+      const markAllBtn = document.getElementById('markAllNotifs');
+      const list = document.getElementById('notifsList');
+      const badge = document.getElementById('notifsBadge');
+      const bgRunBtn = document.getElementById('bgRunBtn');
+      const textarea = document.getElementById('message');
+      if (!panel) return;
+
+      function nt(zh, en) { return state.language === 'en' ? en : zh; }
+
+      function openPanel() {
+        panel.classList.add('open');
+        backdrop.classList.add('open');
+        loadNotifs();
+      }
+      function closePanel() {
+        panel.classList.remove('open');
+        backdrop.classList.remove('open');
+      }
+      openBtn.addEventListener('click', openPanel);
+      closeBtn.addEventListener('click', closePanel);
+      backdrop.addEventListener('click', closePanel);
+      refreshBtn.addEventListener('click', loadNotifs);
+      markAllBtn.addEventListener('click', async () => {
+        try { await fetch('/api/notifications/read-all', { method: 'POST' }); } catch (e) {}
+        await loadNotifs();
+        await refreshBadge();
+      });
+
+      function updateBadge(n) {
+        if (n > 0) { badge.textContent = n > 99 ? '99+' : String(n); badge.style.display = ''; }
+        else { badge.style.display = 'none'; }
+      }
+
+      async function refreshBadge() {
+        try {
+          const j = await apiGet('/api/notifications?limit=1');
+          updateBadge(Number(j.unread || 0));
+        } catch (e) {}
+      }
+
+      async function loadNotifs() {
+        list.innerHTML = `<div class="panel-empty">${nt('正在加载…', 'Loading...')}</div>`;
+        try {
+          const j = await apiGet('/api/notifications?limit=50');
+          updateBadge(Number(j.unread || 0));
+          const items = j.items || [];
+          if (!items.length) {
+            list.innerHTML = `<div class="panel-empty">${nt('暂无后台任务通知', 'No background task notifications yet')}</div>`;
+            return;
+          }
+          list.innerHTML = items.map(it => {
+            const when = it.created_at ? new Date(it.created_at * 1000).toLocaleString() : '';
+            const dot = it.read ? '' : '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#2D7CFF;margin-right:6px"></span>';
+            const icon = it.kind === 'task_failed' ? '⚠️' : '✅';
+            const prefix = it.kind === 'task_failed' ? nt('后台任务失败', 'Task failed') : nt('后台任务完成', 'Task done');
+            const sep = it.title ? nt('：', ': ') : '';
+            return `<button type="button" class="history-item" data-id="${esc(it.id)}" style="display:block;width:100%;text-align:left">
+              <div style="font-weight:600">${dot}${icon} ${esc(prefix)}${sep}${esc(it.title || '')}</div>
+              <div class="muted" style="white-space:pre-wrap;margin:4px 0">${esc(it.body || '')}</div>
+              <div class="muted" style="font-size:11px">${esc(when)}</div>
+            </button>`;
+          }).join('');
+          list.querySelectorAll('[data-id]').forEach(el => {
+            el.addEventListener('click', async () => {
+              try { await fetch(`/api/notifications/${el.dataset.id}/read`, { method: 'POST' }); } catch (e) {}
+              await loadNotifs();
+              await refreshBadge();
+            });
+          });
+        } catch (e) {
+          list.innerHTML = `<div class="panel-empty">${nt('加载失败，请重试', 'Load failed. Please try again.')}</div>`;
+        }
+      }
+
+      async function runInBackground() {
+        const text = (textarea.value || '').trim();
+        if (!text) { textarea.focus(); return; }
+        const original = bgRunBtn.innerHTML;
+        bgRunBtn.disabled = true;
+        try {
+          const r = await fetch('/api/bg-tasks', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message: text }),
+          });
+          if (!r.ok) throw new Error(await r.text());
+          textarea.value = '';
+          textarea.dispatchEvent(new Event('input'));
+          bgRunBtn.innerHTML = `<span>${nt('已加入队列', 'Queued')}</span>`;
+          await refreshBadge();
+        } catch (e) {
+          bgRunBtn.innerHTML = `<span>${nt('加入失败', 'Failed')}</span>`;
+        } finally {
+          setTimeout(() => { bgRunBtn.innerHTML = original; bgRunBtn.disabled = false; }, 1600);
+        }
+      }
+      if (bgRunBtn) bgRunBtn.addEventListener('click', runInBackground);
+
+      refreshBadge();
+      setInterval(refreshBadge, 15000);
     })();
 
     // Disable old PWA shell caching so upgrades always show the latest UI.

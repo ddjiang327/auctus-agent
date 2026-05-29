@@ -49,12 +49,12 @@
 | 1 | 浏览器自动化 | ✅ Done (v0.1.32+) | `app/tools_browser.py`，Playwright |
 | 2 | 网页搜索 | ✅ Done (v0.1.32+) | `app/search_providers.py`，DDG + Tavily/Brave |
 | 4 | 自然语言定时任务 | ✅ Done (v0.1.32+) | `app/cronjobs.py` 进程内 scheduler |
-| 3 | Docker 沙箱 | 📋 Planned | 本文档 §1 |
-| 5 | WhatsApp / Discord 接入 | 📋 Planned | 本文档 §2 |
-| 6 | 并行 sub-agent | 📋 Planned | 本文档 §3 |
-| 7 | 图片生成 | 📋 Planned | 本文档 §4 |
-| 8 | 文本转语音 (TTS) | 📋 Planned | 本文档 §5 |
-| 9 | Skill 插件市场 | 📋 Planned | 本文档 §6 |
+| 5 | Discord 接入 | ✅ Done (v0.1.43) | `app/discord_bot.py` + `/api/discord/*`；WhatsApp 仍未做 |
+| 7 | 图片生成 | ✅ Done (v0.1.43) | `app/tools_image.py` `generate_image` |
+| 8 | 文本转语音 (TTS) | ✅ Done (v0.1.43) | `app/tools_tts.py` `text_to_speech` |
+| 6 | 并行 sub-agent | ⚠️ Partial | `app/subagent.py`：上限 3、60s、仅研究类，非 Wide Research 级 |
+| 9 | Skill 插件市场 | ⚠️ Partial | `app/skills_manager.py`：本地 skill 增删/启停 + 注入，未做外部包/registry 安装 |
+| 3 | Docker 沙箱 | 📋 Planned | 本文档 §1，仍未做（`app/sandbox/` 不存在）|
 
 ---
 
@@ -318,4 +318,53 @@
 
 ---
 
-_Last updated: 2026-05-18_
+## 2026-05-28 复盘：对照 Manus 的结构性天花板
+
+距上次（2026-05-18）已过 10 天，§2/§4/§5 落地，§3/§6 部分落地（见上方优先级表）。
+单点功能补得差不多了，但再对照 Manus，发现**真正的差距不在单点工具，而在三条结构性天花板**——
+这三条决定了 Auctus 现在本质仍是「一问一答 + 少量工具」，而 Manus 是「给个目标走开，回来收结果」。
+
+### 天花板 1：自主步数上限 8（最大短板）
+
+- `app/agent.py:213` / `:505`：`max_tool_iterations = min(settings.max_tool_iterations, 4) if 购物类 else settings.max_tool_iterations`
+- `app/config.py:67`：`max_tool_iterations: int = 8`
+- Manus 单任务跑几十~上百步、30min+；Auctus 8 步（购物 4 步）就收尾。
+- **建议**：Task Mode 下解绑硬上限，改为「预算 / 时间 / 步数」三选一的**软上限 + 每步可中断**；普通 chat 保持短上限不变。
+
+### 天花板 2：同步 + 会话绑定，没有「交给它就走」
+
+- 代码里 grep 不到 `BackgroundTask` / `asyncio.create_task` / 完成推送——agent loop 同步执行，关掉会话任务即停。
+- Manus 最大爽点是「关电脑它还在跑，完了推送你」。这是产品体感上离 Manus 最远的一点。
+- **杠杆点**：推送通道（Telegram / Feishu / 手机 App）**已经有了**，只差「后台任务 + 完成推送」这一层，边际成本低。
+- **建议**：加一张 `tasks` 表 + 一个后台 worker（复用现有 SQLite + cron scheduler，不必上 Celery）：任务入库 → worker 跑 → 状态轮询 + 完成走现有推送通道。
+
+### 天花板 3：没有「看它干活」的实况视图
+
+- Task Mode 现在是**文字**进度面板；Manus 是 "Manus's Computer" 实时看浏览器 / 终端 / 文件。
+- 已有 `browser_screenshot`（`app/tools_browser.py:200`），可低成本做一个「执行实况」标签页。
+- 附带：Manus 每个任务有 replay 分享链接，Auctus 有 history 但不能分享单次任务全过程。
+
+### 其余对照 Manus 仍缺（次要）
+
+- **交付物**：缺 slide/PPT 生成（grep 无 pptx）。现有 markdown / spreadsheet / webpage / react 原型。
+- **沙箱**：§1 仍未做，但对 To C 本地用户优先级低，保持后置。
+- **并行深度**：subagent 仅 3 路 / 研究类，离 Wide Research 远；要做需进程级 + 独立预算。
+
+### 别盲目追平的部分（护城河，保持）
+
+本地优先、真·手机控本机、飞书/Lark 中文生态、本地+托管双轨——这四条 Manus 结构上做不到（它只有云端）。
+战略 = **追平上述三条天花板，其余在护城河上加深**，不要去 Manus 主场打沙箱 / Wide Research。
+
+### 修订后优先级（2026-05-28）
+
+| # | 事项 | 工作量 | 理由 |
+|---|------|--------|------|
+| A | ⏳ 异步后台任务 + 完成推送（天花板 2） | 中 | **后端+最小UI Done 2026-05-28 / relay 待配套**：`background_tasks.py` 持久化队列+worker池（并发 2、崩溃恢复）+ `notify.py`（应用内+Telegram 真可用）+ `/api/bg-tasks`、`/api/notifications` + UI 🔔徽标/通知面板/「后台跑」按钮；后台任务走 Task Mode（接 B 的 25 步软上限）；worker 会 `create_or_resume`+`mark_after_reply`，使后台任务在 C 执行实况视图（`/api/task/{id}/live`）可见（端到端验证时修复的集成 gap）。**手机 relay 推送是 no-op seam**，需 relay-server + mobile-app 配套（另 repo）。**注意：`.env` 未配 `DEEPSEEK_API_KEY`，真实跑前需先填；本环境未验证真实 model/浏览器/UI 渲染** |
+| B | ✅ 解绑/软化 8 步上限（天花板 1） | 小 | **Done 2026-05-28**：新增 `max_task_tool_iterations=25`（`config.py`）+ `_max_iterations_for()` 软上限，`task_mode_active` 透传 chat/stream；普通 chat 仍 8、购物仍 4；每步可被 stop 中断 |
+| C | ✅ 执行实况视图（天花板 3） | 中 | **Done 2026-05-28**：后端 `task_mode.live_view()` + `GET /api/task/{id}/live`；前端任务面板「执行实况」截图条（切到 /live 轮询，缩略图实时刷新）；`tools_browser._auto_snapshot()` 在 open/click/type/scroll 后自动截图（best-effort，每目录保留最近 40 张）。浏览器跑任务时面板实时显示页面截图 |
+| D | ✅ slide/PPT 交付 | 小 | **Done 2026-05-28（HTML deck）**：`tools.make_slides()` 自包含 HTML 幻灯片（封面+每页标题/bullets/正文、←/→ 翻页、@media print 导出 PDF、内容转义），已接入工具 schema/dispatch/`_BASE_TOOL_NAMES`。**真·可编辑 .pptx 未做**（需 python-pptx 新依赖 + PyInstaller 打包），按需后置 |
+| E | 沙箱（§1）/ Wide Research（§3 深化） | 大 | Manus 主场，往后放 |
+
+---
+
+_Last updated: 2026-05-28_

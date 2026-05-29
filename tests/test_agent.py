@@ -851,5 +851,39 @@ class AgentOutputIsolationTests(unittest.TestCase):
         self.assertTrue(any("[必须完成文件写入]" in m.get("content", "") for m in captured_messages))
 
 
+class MaxIterationsForTests(unittest.TestCase):
+    """Unit tests for agent._max_iterations_for — the Task Mode soft-cap helper."""
+
+    def setUp(self):
+        self.old_normal = settings.max_tool_iterations
+        self.old_task = settings.max_task_tool_iterations
+        settings.max_tool_iterations = 8
+        settings.max_task_tool_iterations = 25
+
+    def tearDown(self):
+        settings.max_tool_iterations = self.old_normal
+        settings.max_task_tool_iterations = self.old_task
+
+    def test_normal_chat_uses_normal_cap(self):
+        self.assertEqual(agent._max_iterations_for("解释一下这段代码", False), 8)
+
+    def test_task_mode_raises_cap(self):
+        self.assertEqual(agent._max_iterations_for("帮我研究并对比三个方案", True), 25)
+
+    def test_shopping_keeps_small_budget_outside_task_mode(self):
+        self.assertEqual(agent._max_iterations_for("帮我买一个便宜的显示器报价", False), 4)
+
+    def test_shopping_keeps_small_budget_inside_task_mode(self):
+        # Shopping budget is a deliberate cost guard and must not be expanded
+        # by Task Mode, otherwise a single shopping research could blow up cost.
+        self.assertEqual(agent._max_iterations_for("帮我买一个便宜的显示器报价", True), 4)
+
+    def test_task_cap_never_below_normal_cap(self):
+        # Misconfigured: task cap accidentally lower than normal cap.
+        # Helper guards with max(...) so Task Mode never gets fewer iterations than normal.
+        settings.max_task_tool_iterations = 3
+        self.assertEqual(agent._max_iterations_for("研究一下", True), 8)
+
+
 if __name__ == "__main__":
     unittest.main()

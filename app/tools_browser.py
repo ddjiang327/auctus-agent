@@ -14,6 +14,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -123,6 +124,38 @@ def _close_session_internal() -> None:
         _STATE.update({"ready": False, "playwright": None, "browser": None, "context": None, "page": None})
 
 
+# ─────────────────────────── auto-snapshot (execution live-view) ──────────────
+# After page-changing actions we save a screenshot into the active output dir so the
+# Task Mode 「执行实况」面板 has visuals. Best-effort: never break the real tool.
+
+_AUTO_SHOT_PREFIX = "auto-"
+_AUTO_SHOT_KEEP = 40  # cap retained auto-shots per output dir to bound disk
+
+
+def _auto_snapshot(label: str = "") -> None:
+    page = _STATE.get("page")
+    if not _STATE.get("ready") or page is None:
+        return
+    try:
+        safe_label = "".join(c if c.isalnum() else "-" for c in (label or ""))[:20].strip("-") or "view"
+        out_dir = settings.output_dir
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = (out_dir / f"{_AUTO_SHOT_PREFIX}{int(time.time() * 1000)}-{safe_label}.png").resolve()
+        page.screenshot(path=str(out_path), full_page=False)
+        _prune_auto_shots(out_dir)
+    except Exception as exc:
+        log.debug("auto-snapshot skipped: %s", exc)
+
+
+def _prune_auto_shots(out_dir: Path) -> None:
+    try:
+        shots = sorted(out_dir.glob(f"{_AUTO_SHOT_PREFIX}*.png"), key=lambda p: p.stat().st_mtime)
+        for old in shots[:-_AUTO_SHOT_KEEP]:
+            old.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
 # ─────────────────────────── public tool functions ────────────────────────────
 
 
@@ -138,6 +171,7 @@ def browser_open(url: str, wait_for: str = "domcontentloaded") -> dict:
         page = _STATE["page"]
         wait_until = wait_for if wait_for in {"load", "domcontentloaded", "networkidle"} else "domcontentloaded"
         page.goto(url, wait_until=wait_until, timeout=12_000)
+        _auto_snapshot("open")
         return {"ok": True, "url": page.url, "title": page.title()}
     except Exception as exc:
         return {"error": f"{type(exc).__name__}: {exc}"}
@@ -175,6 +209,7 @@ def browser_click(selector: str, timeout_ms: int = 5000) -> dict:
     try:
         page = _STATE["page"]
         page.click(selector, timeout=int(timeout_ms))
+        _auto_snapshot("click")
         return {"ok": True, "url": page.url, "title": page.title()}
     except Exception as exc:
         return {"error": f"{type(exc).__name__}: {exc}"}
@@ -192,6 +227,7 @@ def browser_type(selector: str, text: str, submit: bool = False) -> dict:
         page.fill(selector, text or "")
         if submit:
             page.press(selector, "Enter")
+        _auto_snapshot("type")
         return {"ok": True, "url": page.url}
     except Exception as exc:
         return {"error": f"{type(exc).__name__}: {exc}"}
@@ -275,6 +311,7 @@ def browser_scroll(direction: str = "down", pixels: int = 600) -> dict:
             page.evaluate("(y) => window.scrollBy(0, -y)", int(pixels))
         else:
             page.evaluate("(y) => window.scrollBy(0, y)", int(pixels))
+        _auto_snapshot("scroll")
         return {"ok": True, "direction": direction}
     except Exception as exc:
         return {"error": f"{type(exc).__name__}: {exc}"}

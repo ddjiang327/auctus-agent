@@ -19,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 import litellm
 from pydantic import BaseModel
 
-from . import accounting, agent, evidence, intent, memory, preferences, relay, routing, runtime_state, session_control, task_mode, tools
+from . import accounting, agent, background_tasks, evidence, intent, memory, notify, preferences, relay, routing, runtime_state, session_control, task_mode, tools
 from .config import settings
 from .version import API_COMPAT_VERSION, APP_NAME, APP_VERSION, RELEASE_CHANNEL
 
@@ -27,6 +27,8 @@ from contextlib import asynccontextmanager
 
 def _ensure_device_token() -> None:
     """Generate and persist MOBILE_RELAY_DEVICE_TOKEN on first run."""
+    if not (settings.mobile_relay_url and settings.mobile_relay_admin_secret):
+        return
     if settings.mobile_relay_device_token:
         return
     import secrets
@@ -78,8 +80,10 @@ async def _lifespan(app):
     _ensure_device_token()
     start_relay_client(_relay_chat_handler)
     _cronjobs.start_scheduler()
+    background_tasks.start_workers()
     yield
     _cronjobs.stop_scheduler()
+    background_tasks.stop_workers()
     stop_relay_client()
 
 app = FastAPI(title="Auctus Agent", lifespan=_lifespan)
@@ -2107,6 +2111,11 @@ class ChatOut(BaseModel):
     task: Optional[dict] = None
 
 
+class BgTaskIn(BaseModel):
+    message: str
+    session_id: Optional[str] = None
+
+
 class ModelIn(BaseModel):
     model: str
 
@@ -2589,15 +2598,15 @@ def chat(body: ChatIn) -> ChatOut:
             with tools.terminal_access_override("enabled"):
                 if file_scope_override:
                     with tools.permission_scope_override(file_scope_override):
-                        result = agent.chat(sid, message, extra_system_context=task_context, allow_tools=(not plan_only_task_turn and not quick_without_tools))
+                        result = agent.chat(sid, message, extra_system_context=task_context, allow_tools=(not plan_only_task_turn and not quick_without_tools), task_mode_active=bool(active_task))
                 else:
-                    result = agent.chat(sid, message, extra_system_context=task_context, allow_tools=(not plan_only_task_turn and not quick_without_tools))
+                    result = agent.chat(sid, message, extra_system_context=task_context, allow_tools=(not plan_only_task_turn and not quick_without_tools), task_mode_active=bool(active_task))
         else:
             if file_scope_override:
                 with tools.permission_scope_override(file_scope_override):
-                    result = agent.chat(sid, message, extra_system_context=task_context, allow_tools=(not plan_only_task_turn and not quick_without_tools))
+                    result = agent.chat(sid, message, extra_system_context=task_context, allow_tools=(not plan_only_task_turn and not quick_without_tools), task_mode_active=bool(active_task))
             else:
-                result = agent.chat(sid, message, extra_system_context=task_context, allow_tools=(not plan_only_task_turn and not quick_without_tools))
+                result = agent.chat(sid, message, extra_system_context=task_context, allow_tools=(not plan_only_task_turn and not quick_without_tools), task_mode_active=bool(active_task))
     except HTTPException:
         raise
     except Exception as e:
@@ -2877,6 +2886,7 @@ def chat_stream_endpoint(body: ChatIn):
                     sid, message,
                     extra_system_context=task_context,
                     allow_tools=allow_tools_flag,
+                    task_mode_active=bool(active_task),
                 )
                 for event in stream:
                     etype = event.get("type")
@@ -2923,6 +2933,18 @@ def task_state(session_id: str) -> dict:
     return {"task": task}
 
 
+@app.get("/api/task/{session_id}/live")
+def task_live(session_id: str) -> dict:
+    """执行实况视图：结构化执行轨迹（步骤/活动时间线/产物）+ 本次任务产生的截图。
+
+    截图来自 browser_screenshot，保存在 outputs/<task_id>/ 下。无任务时 task 为 None。
+    """
+    view = task_mode.live_view(session_id)
+    if view is None:
+        return {"task": None, "screenshots": []}
+    return {"task": view, "screenshots": _task_screenshots(session_id)}
+
+
 @app.get("/api/tasks")
 def task_list(limit: int = 20) -> dict:
     return {"items": task_mode.list_tasks(limit=limit)}
@@ -2936,6 +2958,55 @@ def evidence_list(session_id: str, limit: int = 20) -> dict:
 @app.post("/api/task/{session_id}/end")
 def task_end(session_id: str) -> dict:
     return {"task": task_mode.end(session_id)}
+
+
+# ── 后台异步任务（交给它就走，完成推送） ──────────────────────────────────────
+
+@app.post("/api/bg-tasks")
+def bg_task_create(body: BgTaskIn) -> dict:
+    """把一个目标入队为后台任务，立即返回（不阻塞）。worker 在后台跑完后推送通知。"""
+    message = (body.message or "").strip()
+    if not message:
+        raise HTTPException(400, "empty message")
+    try:
+        job = background_tasks.enqueue(message, session_id=body.session_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return {"job": job}
+
+
+@app.get("/api/bg-tasks")
+def bg_task_list(limit: int = Query(30, ge=1, le=100)) -> dict:
+    return {"jobs": background_tasks.list_jobs(limit=limit)}
+
+
+@app.get("/api/bg-tasks/{job_id}")
+def bg_task_get(job_id: str) -> dict:
+    job = background_tasks.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "job not found")
+    return {"job": job}
+
+
+@app.get("/api/notifications")
+def notifications_list(
+    limit: int = Query(30, ge=1, le=100),
+    unread_only: bool = False,
+) -> dict:
+    return {
+        "items": notify.list_notifications(limit=limit, unread_only=unread_only),
+        "unread": notify.unread_count(),
+    }
+
+
+@app.post("/api/notifications/{notification_id}/read")
+def notification_mark_read(notification_id: str) -> dict:
+    return {"ok": notify.mark_read(notification_id), "unread": notify.unread_count()}
+
+
+@app.post("/api/notifications/read-all")
+def notifications_mark_all_read() -> dict:
+    return {"updated": notify.mark_all_read(), "unread": notify.unread_count()}
 
 
 def _quick_answer_context() -> str:
@@ -4259,8 +4330,9 @@ def mobile_status():
 def pairing_info():
     """Returns the data needed to generate a mobile pairing QR code."""
     relay_url = settings.mobile_relay_url or ""
+    admin_secret = settings.mobile_relay_admin_secret or ""
     device_token = settings.mobile_relay_device_token or ""
-    configured = bool(relay_url and device_token)
+    configured = bool(relay_url and admin_secret and device_token)
     return {
         "configured": configured,
         "relay_url": relay_url,
@@ -4279,8 +4351,9 @@ def pairing_qr():
         raise HTTPException(503, "qrcode package not installed")
 
     relay_url = settings.mobile_relay_url or ""
+    admin_secret = settings.mobile_relay_admin_secret or ""
     device_token = settings.mobile_relay_device_token or ""
-    if not relay_url or not device_token:
+    if not relay_url or not admin_secret or not device_token:
         raise HTTPException(404, "Relay not configured")
 
     import json as _json
@@ -4295,8 +4368,9 @@ def pairing_qr():
 @app.get("/pair", response_class=HTMLResponse)
 def pair_page(lang: str = "zh"):
     relay_url = settings.mobile_relay_url or ""
+    admin_secret = settings.mobile_relay_admin_secret or ""
     device_token = settings.mobile_relay_device_token or ""
-    configured = bool(relay_url and device_token)
+    configured = bool(relay_url and admin_secret and device_token)
     is_en = lang.startswith("en")
 
     if not configured:
@@ -4852,3 +4926,35 @@ def _file_url(path: str) -> str:
     except ValueError:
         rel = Path(p.name)
     return "/files/" + "/".join(rel.parts)
+
+
+_SCREENSHOT_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+
+
+def _task_screenshots(session_id: str) -> list[dict]:
+    """List image files produced under this task's output dir (outputs/<task_id>/),
+    newest first. URLs are built relative to the base output_dir so they resolve
+    against the existing /files/ static mount."""
+    base = settings.output_dir.resolve()
+    task_dir = (base / agent._safe_task_id(session_id)).resolve()
+    if not task_dir.is_dir():
+        return []
+    shots: list[dict] = []
+    for fpath in task_dir.glob("*"):
+        if not fpath.is_file() or fpath.name.startswith("."):
+            continue
+        if fpath.suffix.lower() not in _SCREENSHOT_EXTS:
+            continue
+        try:
+            stat = fpath.stat()
+            rel = fpath.relative_to(base)
+        except (OSError, ValueError):
+            continue
+        shots.append({
+            "name": fpath.name,
+            "url": "/files/" + "/".join(rel.parts),
+            "size": stat.st_size,
+            "modified": stat.st_mtime,
+        })
+    shots.sort(key=lambda s: s["modified"], reverse=True)
+    return shots

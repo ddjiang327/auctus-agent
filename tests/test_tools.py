@@ -488,5 +488,49 @@ class EmailPromptTests(unittest.TestCase):
         self.assertIn("相对日期", prompt)
 
 
+class MakeSlidesTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.old_output = settings.output_dir
+        self.old_workspace = settings.workspace_dir
+        settings.output_dir = self.root / "outputs"
+        settings.workspace_dir = self.root / "inputs"
+        settings.output_dir.mkdir()
+        settings.workspace_dir.mkdir()
+
+    def tearDown(self):
+        settings.output_dir = self.old_output
+        settings.workspace_dir = self.old_workspace
+        self.tmp.cleanup()
+
+    def test_make_slides_writes_self_contained_deck(self):
+        res = tools.make_slides("项目汇报", [
+            {"title": "背景", "bullets": ["要点一", "要点二"]},
+            {"title": "结论", "body": "推荐方案 A"},
+        ])
+
+        self.assertIn("path", res)
+        self.assertEqual(res["slide_count"], 2)
+        html = Path(res["path"]).read_text(encoding="utf-8")
+        # title slide + 2 content slides
+        self.assertEqual(html.count('class="slide'), 3)
+        self.assertIn("项目汇报", html)
+        # self-contained (no external CDN in the deck body) + print-to-PDF support
+        self.assertNotIn("http://", html.split("由 Auctus Agent")[0])
+        self.assertIn("@media print", html)
+
+    def test_make_slides_escapes_user_content(self):
+        res = tools.make_slides("X", [{"title": "<b>t</b>", "bullets": ["<script>alert(1)</script>"]}])
+        html = Path(res["path"]).read_text(encoding="utf-8")
+        self.assertNotIn("<script>alert(1)</script>", html)
+        self.assertIn("&lt;script&gt;", html)
+
+    def test_make_slides_via_run_tool_dispatch(self):
+        out = tools.run_tool("make_slides", json.dumps({"title": "T", "slides": [{"title": "S1", "bullets": ["a"]}]}))
+        self.assertIsInstance(out, dict)
+        self.assertIn("path", out)
+
+
 if __name__ == "__main__":
     unittest.main()

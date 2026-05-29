@@ -515,6 +515,75 @@ def make_webpage(title: str, sections: list[dict], target_dir: str = "") -> dict
     return {"path": str(out_path), "filename": fname}
 
 
+SLIDES_TEMPLATE = """<!doctype html>
+<html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{ title | e }}</title>
+<style>
+  :root{--bg:#0b1020;--card:#121a30;--text:#eaf0ff;--muted:#9fb0d0;--accent:#2d7cff}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,system-ui,"PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--text)}
+  .deck{min-height:100vh;display:flex;align-items:center;justify-content:center}
+  .slide{display:none;width:min(960px,92vw);min-height:58vh;padding:56px;background:var(--card);border-radius:18px;box-shadow:0 24px 80px rgba(0,0,0,.5)}
+  .slide.active{display:block}
+  .slide h1{font-size:42px;margin:0 0 10px}
+  .slide h2{font-size:30px;margin:0 0 22px;color:var(--accent)}
+  .slide ul{font-size:21px;line-height:1.85;padding-left:1.2em;margin:0}
+  .slide .body{font-size:20px;line-height:1.7;color:var(--muted);white-space:pre-wrap}
+  .title-slide{text-align:center}
+  .title-slide .sub{color:var(--muted);font-size:17px;margin-top:14px}
+  .bar{position:fixed;bottom:16px;left:0;right:0;display:flex;gap:14px;align-items:center;justify-content:center;color:var(--muted);font-size:13px}
+  .bar button{background:var(--card);color:var(--text);border:1px solid rgba(255,255,255,.18);border-radius:8px;padding:6px 12px;cursor:pointer}
+  @media print{
+    body{background:#fff;color:#000}
+    .bar{display:none}
+    .deck{display:block;min-height:auto}
+    .slide{display:block!important;page-break-after:always;box-shadow:none;background:#fff;color:#000;border:1px solid #ccc;margin:0 0 12px;width:auto}
+    .slide h2{color:#0a66c2}.slide .body{color:#333}
+  }
+</style></head><body>
+<div class="deck">
+  <section class="slide title-slide active"><h1>{{ title | e }}</h1><div class="sub">由 Auctus Agent 生成 · {{ now }}</div></section>
+  {% for s in slides %}
+  <section class="slide">
+    {% if s.title %}<h2>{{ s.title | e }}</h2>{% endif %}
+    {% if s.bullets %}<ul>{% for b in s.bullets %}<li>{{ b | e }}</li>{% endfor %}</ul>{% endif %}
+    {% if s.body %}<div class="body">{{ s.body | e }}</div>{% endif %}
+  </section>
+  {% endfor %}
+</div>
+<div class="bar">
+  <button onclick="prev()">‹ 上一页</button>
+  <span id="counter"></span>
+  <button onclick="next()">下一页 ›</button>
+  <span style="opacity:.7">· ←/→ 翻页 · 打印可导出 PDF</span>
+</div>
+<script>
+  let i=0; const slides=[...document.querySelectorAll('.slide')];
+  function show(n){i=Math.max(0,Math.min(n,slides.length-1));slides.forEach((s,k)=>s.classList.toggle('active',k===i));document.getElementById('counter').textContent=(i+1)+' / '+slides.length;}
+  function next(){show(i+1);} function prev(){show(i-1);}
+  document.addEventListener('keydown',e=>{if(e.key==='ArrowRight'||e.key===' '){next();}else if(e.key==='ArrowLeft'){prev();}});
+  show(0);
+</script>
+</body></html>
+"""
+
+
+def make_slides(title: str, slides: list[dict], target_dir: str = "") -> dict:
+    """生成一个自包含的 HTML 幻灯片（reveal 风格，键盘 ←/→ 翻页，可打印导出 PDF）。
+
+    slides: [{ "title": "...", "bullets": ["...", ...], "body": "..." }]
+    target_dir: optional folder path for the generated file.
+    """
+    slides = slides or []
+    tpl = Template(SLIDES_TEMPLATE)
+    html = tpl.render(title=title, slides=slides, now=time.strftime("%Y-%m-%d %H:%M"))
+    out_path, fname = _artifact_output_path(title, ".html", target_dir)
+    if out_path is None:
+        return {"error": "access denied: target_dir is outside authorized workspace or chat-authorized paths"}
+    out_path.write_text(html, encoding="utf-8")
+    return {"path": str(out_path), "filename": fname, "slide_count": len(slides)}
+
+
 REACT_PROTOTYPE_TEMPLATE = """<!doctype html>
 <html lang="zh"><head>
 <meta charset="utf-8">
@@ -1536,6 +1605,7 @@ _RISK = {
     "make_markdown_report": "low",
     "make_spreadsheet": "low",
     "make_webpage": "medium",
+    "make_slides": "medium",
     "make_react_prototype": "medium",
     "extract_memory_candidates": "medium",
     "remember": "medium",
@@ -2196,6 +2266,34 @@ TOOL_SCHEMAS: list[dict] = [
                     "target_dir": {"type": "string", "description": "可选。用户指定的保存文件夹路径，例如 ~/Desktop/Project Files。未提供时才使用默认 outputs。"},
                 },
                 "required": ["title", "sections"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "make_slides",
+            "description": "生成一个自包含的 HTML 幻灯片/演示文稿（reveal 风格，键盘 ←/→ 翻页，浏览器里可打印导出 PDF）。适合做汇报、提案、总结演示。每页一个要点标题 + 若干 bullet。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "演示文稿标题（会作为封面页）"},
+                    "slides": {
+                        "type": "array",
+                        "description": "每一页幻灯片",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "title": {"type": "string", "description": "本页标题"},
+                                "bullets": {"type": "array", "items": {"type": "string"}, "description": "要点列表"},
+                                "body": {"type": "string", "description": "可选。本页正文段落（与 bullets 二选一或并存）"},
+                            },
+                            "required": ["title"],
+                        },
+                    },
+                    "target_dir": {"type": "string", "description": "可选。用户指定的保存文件夹路径。未提供时才使用默认 outputs。"},
+                },
+                "required": ["title", "slides"],
             },
         },
     },
@@ -3144,6 +3242,7 @@ _BASE_TOOL_NAMES = {
     "make_markdown_report",
     "make_spreadsheet",
     "make_webpage",
+    "make_slides",
     "make_react_prototype",
     "list_outputs",
     "get_clipboard",
@@ -3286,6 +3385,7 @@ _DISPATCH = {
     "make_markdown_report": make_markdown_report,
     "make_spreadsheet": make_spreadsheet,
     "make_webpage": make_webpage,
+    "make_slides": make_slides,
     "make_react_prototype": make_react_prototype,
     "extract_memory_candidates": extract_memory_candidates,
     "remember": remember,

@@ -134,6 +134,7 @@ def chat(
     user_text: str,
     extra_system_context: Optional[str] = None,
     allow_tools: bool = True,
+    task_mode_active: bool = False,
 ) -> dict:
     """处理一轮用户输入。返回 {reply, files} —— files 是新生成的文件相对路径列表。"""
     files_produced: list[str] = []
@@ -194,9 +195,24 @@ def chat(
                     tool_schemas,
                     model=effective_model,
                     require_file_write=bool(_persistent_record_write_context(user_text)),
+                    task_mode_active=task_mode_active,
                 )
     finally:
         settings.output_dir = base_output_dir
+
+
+def _max_iterations_for(user_text: str, task_mode_active: bool) -> int:
+    """工具循环的迭代上限。
+
+    - 购物/报价类：保留原有的小预算（≤4），避免无谓的搜索成本。
+    - Task Mode：用更高的软上限，支持长程多步任务（每步仍可被 stop 中断）。
+    - 普通 chat：维持 max_tool_iterations 不变。
+    """
+    if _looks_like_shopping_or_quote_task(user_text):
+        return min(settings.max_tool_iterations, 4)
+    if task_mode_active:
+        return max(settings.max_tool_iterations, settings.max_task_tool_iterations)
+    return settings.max_tool_iterations
 
 
 def _chat_with_tools(
@@ -207,10 +223,11 @@ def _chat_with_tools(
     tool_schemas: list[dict],
     model: str = "",
     require_file_write: bool = False,
+    task_mode_active: bool = False,
 ) -> dict:
     """Run the tool-use loop. Assumes output_dir and usage context are already set."""
     last_tool_results: list[dict] = []
-    max_iterations = min(settings.max_tool_iterations, 4) if _looks_like_shopping_or_quote_task(user_text) else settings.max_tool_iterations
+    max_iterations = _max_iterations_for(user_text, task_mode_active)
     for iteration in range(max_iterations):
         if session_control.is_stopped(session_id):
             stop_msg = "已停止当前任务。"
@@ -414,6 +431,7 @@ def chat_stream(
     user_text: str,
     extra_system_context: Optional[str] = None,
     allow_tools: bool = True,
+    task_mode_active: bool = False,
 ) -> Iterator[dict]:
     """流式版本的 chat()。
 
@@ -486,6 +504,7 @@ def chat_stream(
                     tool_schemas,
                     model=effective_model,
                     require_file_write=bool(_persistent_record_write_context(user_text)),
+                    task_mode_active=task_mode_active,
                 )
     finally:
         settings.output_dir = base_output_dir
@@ -499,10 +518,11 @@ def _chat_stream_with_tools(
     tool_schemas: list[dict],
     model: str = "",
     require_file_write: bool = False,
+    task_mode_active: bool = False,
 ) -> Iterator[dict]:
     """流式工具循环。逻辑与 _chat_with_tools 等价，把 LLM 调用换成流式版本。"""
     last_tool_results: list[dict] = []
-    max_iterations = min(settings.max_tool_iterations, 4) if _looks_like_shopping_or_quote_task(user_text) else settings.max_tool_iterations
+    max_iterations = _max_iterations_for(user_text, task_mode_active)
     for iteration in range(max_iterations):
         if session_control.is_stopped(session_id):
             stop_msg = "已停止当前任务。"

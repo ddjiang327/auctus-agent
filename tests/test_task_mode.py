@@ -157,6 +157,37 @@ class TaskModeTests(unittest.TestCase):
         updated_again = task_mode.mark_after_reply("session-task", reply)
         self.assertEqual(len(updated_again["artifacts"]["items"]), 1)
 
+    def test_live_view_returns_none_when_no_task(self):
+        self.assertIsNone(task_mode.live_view("missing-session"))
+
+    def test_live_view_returns_structured_trace(self):
+        task_mode.create_or_resume("live-session", "研究并对比三个云服务商")
+        task_mode.add_activity("live-session", "已检查一个来源，继续整理结果", "tool_done")
+
+        view = task_mode.live_view("live-session")
+
+        self.assertIsNotNone(view)
+        self.assertEqual(view["goal"], "研究并对比三个云服务商")
+        self.assertEqual(view["status"], "in_progress")
+        self.assertEqual(len(view["steps"]), len(task_mode.DEFAULT_STEPS))
+        self.assertEqual(view["steps"][0]["status"], "in_progress")
+        # activity timeline carries the observable work note we just added
+        self.assertEqual(view["activity"][-1]["text"], "已检查一个来源，继续整理结果")
+        self.assertEqual(view["activity"][-1]["key"], "tool_done")
+        self.assertIn("time", view["activity"][-1])
+        self.assertEqual(view["artifacts"], [])
+
+    def test_live_view_surfaces_artifacts(self):
+        task_mode.create_or_resume("live-artifact", "对比显卡")
+        task_mode.mark_after_reply(
+            "live-artifact", "| 型号 | 价格 |\n|---|---:|\n| RTX 4060 | $299 |"
+        )
+
+        view = task_mode.live_view("live-artifact")
+
+        self.assertEqual(len(view["artifacts"]), 1)
+        self.assertEqual(view["artifacts"][0]["type"], "comparison_table")
+
 
 if __name__ == "__main__":
     unittest.main()

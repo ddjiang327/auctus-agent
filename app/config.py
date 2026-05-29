@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     # Mobile relay (cloud bridge to mobile app)
     mobile_relay_url: Optional[str] = None          # e.g. ws://120.24.223.0
     mobile_relay_admin_secret: Optional[str] = None # server admin secret, baked into app
+    mobile_relay_token: Optional[str] = None        # legacy name for mobile_relay_admin_secret
     mobile_relay_device_token: Optional[str] = None # this desktop's unique token (shown as QR)
 
     # Telegram
@@ -64,6 +65,10 @@ class Settings(BaseSettings):
 
     # Agent 行为
     max_tool_iterations: int = 8
+    # Task Mode 下的工具迭代上限（软上限，每步仍可被 stop 中断）。普通 chat 仍用 max_tool_iterations。
+    max_task_tool_iterations: int = 25
+    # 后台异步任务的并发 worker 数（小并发，控制 LLM 成本/CPU）。
+    bg_task_concurrency: int = 2
     context_token_budget: int = 8000  # 超过就触发滚动摘要
     update_check_url: Optional[str] = None
     agent_download_url: str = "https://github.com/ddjiang327/auctus-agent/releases/latest"
@@ -77,6 +82,8 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+if not settings.mobile_relay_admin_secret and settings.mobile_relay_token:
+    settings.mobile_relay_admin_secret = settings.mobile_relay_token
 # Resolve relative paths to absolute immediately so os.chdir() later can't break them.
 settings.data_dir = settings.data_dir.resolve()
 settings.output_dir = settings.output_dir.resolve()
